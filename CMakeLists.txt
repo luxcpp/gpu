@@ -51,6 +51,7 @@ option(LUX_GPU_CPU_USE_OPENMP "Use OpenMP for CPU backend parallelization" ON)
 set(CORE_SOURCES
     src/gpu_core.cpp
     src/kernel_loader.cpp
+    src/zk_ops.cpp
 )
 
 # CPU backend (builtin, optional but recommended)
@@ -126,8 +127,12 @@ if(LUX_GPU_BUILD_TESTS)
     target_link_libraries(test_kernel_loader PRIVATE luxgpu_core)
     add_test(NAME test_kernel_loader COMMAND test_kernel_loader)
 
+    add_executable(test_zk_ops test/test_zk_ops.cpp)
+    target_link_libraries(test_zk_ops PRIVATE luxgpu_core)
+    add_test(NAME test_zk_ops COMMAND test_zk_ops)
+
     # Set library path for tests to find plugins
-    set_tests_properties(test_gpu_core test_kernel_loader PROPERTIES
+    set_tests_properties(test_gpu_core test_kernel_loader test_zk_ops PROPERTIES
         ENVIRONMENT "LUX_GPU_BACKEND_PATH=${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()

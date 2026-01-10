@@ -1,10 +1,10 @@
 prefix=@CMAKE_INSTALL_PREFIX@
 exec_prefix=${prefix}
-libdir=${prefix}/lib
-includedir=${prefix}/include
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
 Name: lux-gpu
 Description: Lux GPU - Unified GPU acceleration (Metal/CUDA/Dawn/CPU)
 Version: @PROJECT_VERSION@
-Libs: -L${libdir} -llux-gpu
+Libs: -L${libdir} -lluxgpu_core
 Cflags: -I${includedir}

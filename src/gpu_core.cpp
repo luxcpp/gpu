@@ -6,7 +6,9 @@
 #include "lux/gpu.h"
 #include "lux/gpu/backend_plugin.h"
 #include "plugin_loader.hpp"
+#include <chrono>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -612,35 +614,337 @@ float lux_tensor_reduce_mean(LuxGPU* gpu, LuxTensor* t) {
     return result;
 }
 
-// Reductions along axes (stubs - not yet fully implemented)
+// =============================================================================
+// Axis Reduction Helpers
+// =============================================================================
+
+// Compute output shape after reducing along specified axes
+static std::vector<int64_t> compute_reduced_shape(const std::vector<int64_t>& shape, const int* axes, int naxes) {
+    std::vector<bool> reduce_axis(shape.size(), false);
+    for (int i = 0; i < naxes; i++) {
+        int ax = axes[i];
+        if (ax < 0) ax += static_cast<int>(shape.size());
+        if (ax >= 0 && ax < static_cast<int>(shape.size())) {
+            reduce_axis[ax] = true;
+        }
+    }
+
+    std::vector<int64_t> out_shape;
+    for (size_t i = 0; i < shape.size(); i++) {
+        if (!reduce_axis[i]) {
+            out_shape.push_back(shape[i]);
+        }
+    }
+    if (out_shape.empty()) {
+        out_shape.push_back(1);  // Scalar result
+    }
+    return out_shape;
+}
+
+// Compute outer_size and inner_size for contiguous last-axis reduction
+// Returns true if reduction can be expressed as (outer_size, inner_size) -> outer_size
+static bool can_use_axis_reduction(const std::vector<int64_t>& shape, const int* axes, int naxes,
+                                    size_t* outer_size, size_t* inner_size) {
+    if (naxes != 1 || shape.empty()) return false;
+
+    int ax = axes[0];
+    if (ax < 0) ax += static_cast<int>(shape.size());
+    if (ax < 0 || ax >= static_cast<int>(shape.size())) return false;
+
+    // Only support reduction along last axis for backend dispatch
+    if (ax != static_cast<int>(shape.size()) - 1) return false;
+
+    *inner_size = static_cast<size_t>(shape.back());
+    *outer_size = 1;
+    for (size_t i = 0; i < shape.size() - 1; i++) {
+        *outer_size *= static_cast<size_t>(shape[i]);
+    }
+    return true;
+}
+
+// CPU fallback for sum reduction along axes
+static void cpu_reduce_sum_axes(const float* in, float* out, const std::vector<int64_t>& shape,
+                                 const int* axes, int naxes, const std::vector<int64_t>& out_shape) {
+    std::vector<bool> reduce_axis(shape.size(), false);
+    for (int i = 0; i < naxes; i++) {
+        int ax = axes[i];
+        if (ax < 0) ax += static_cast<int>(shape.size());
+        if (ax >= 0 && ax < static_cast<int>(shape.size())) {
+            reduce_axis[ax] = true;
+        }
+    }
+
+    // Compute strides for input
+    std::vector<size_t> strides(shape.size());
+    size_t stride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; i--) {
+        strides[i] = stride;
+        stride *= static_cast<size_t>(shape[i]);
+    }
+
+    // Compute output size
+    size_t out_size = 1;
+    for (auto d : out_shape) out_size *= static_cast<size_t>(d);
+    std::memset(out, 0, out_size * sizeof(float));
+
+    // Iterate over input and accumulate
+    size_t in_size = stride;
+    for (size_t idx = 0; idx < in_size; idx++) {
+        // Decompose linear index into multi-index
+        size_t tmp = idx;
+        size_t out_idx = 0;
+        size_t out_stride = 1;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; d--) {
+            size_t coord = tmp % static_cast<size_t>(shape[d]);
+            tmp /= static_cast<size_t>(shape[d]);
+            if (!reduce_axis[d]) {
+                // Find position in output
+                int out_d = 0;
+                for (int k = 0; k < d; k++) {
+                    if (!reduce_axis[k]) out_d++;
+                }
+                // Compute contribution to out_idx
+                size_t os = 1;
+                for (size_t k = out_d + 1; k < out_shape.size(); k++) {
+                    os *= static_cast<size_t>(out_shape[k]);
+                }
+                out_idx += coord * os;
+            }
+        }
+        out[out_idx] += in[idx];
+    }
+}
+
+// CPU fallback for max reduction along axes
+static void cpu_reduce_max_axes(const float* in, float* out, const std::vector<int64_t>& shape,
+                                 const int* axes, int naxes, const std::vector<int64_t>& out_shape) {
+    std::vector<bool> reduce_axis(shape.size(), false);
+    for (int i = 0; i < naxes; i++) {
+        int ax = axes[i];
+        if (ax < 0) ax += static_cast<int>(shape.size());
+        if (ax >= 0 && ax < static_cast<int>(shape.size())) {
+            reduce_axis[ax] = true;
+        }
+    }
+
+    std::vector<size_t> strides(shape.size());
+    size_t stride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; i--) {
+        strides[i] = stride;
+        stride *= static_cast<size_t>(shape[i]);
+    }
+
+    size_t out_size = 1;
+    for (auto d : out_shape) out_size *= static_cast<size_t>(d);
+
+    // Initialize with -inf
+    for (size_t i = 0; i < out_size; i++) {
+        out[i] = -std::numeric_limits<float>::infinity();
+    }
+
+    size_t in_size = stride;
+    for (size_t idx = 0; idx < in_size; idx++) {
+        size_t tmp = idx;
+        size_t out_idx = 0;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; d--) {
+            size_t coord = tmp % static_cast<size_t>(shape[d]);
+            tmp /= static_cast<size_t>(shape[d]);
+            if (!reduce_axis[d]) {
+                int out_d = 0;
+                for (int k = 0; k < d; k++) {
+                    if (!reduce_axis[k]) out_d++;
+                }
+                size_t os = 1;
+                for (size_t k = out_d + 1; k < out_shape.size(); k++) {
+                    os *= static_cast<size_t>(out_shape[k]);
+                }
+                out_idx += coord * os;
+            }
+        }
+        if (in[idx] > out[out_idx]) {
+            out[out_idx] = in[idx];
+        }
+    }
+}
+
+// CPU fallback for min reduction along axes
+static void cpu_reduce_min_axes(const float* in, float* out, const std::vector<int64_t>& shape,
+                                 const int* axes, int naxes, const std::vector<int64_t>& out_shape) {
+    std::vector<bool> reduce_axis(shape.size(), false);
+    for (int i = 0; i < naxes; i++) {
+        int ax = axes[i];
+        if (ax < 0) ax += static_cast<int>(shape.size());
+        if (ax >= 0 && ax < static_cast<int>(shape.size())) {
+            reduce_axis[ax] = true;
+        }
+    }
+
+    std::vector<size_t> strides(shape.size());
+    size_t stride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; i--) {
+        strides[i] = stride;
+        stride *= static_cast<size_t>(shape[i]);
+    }
+
+    size_t out_size = 1;
+    for (auto d : out_shape) out_size *= static_cast<size_t>(d);
+
+    for (size_t i = 0; i < out_size; i++) {
+        out[i] = std::numeric_limits<float>::infinity();
+    }
+
+    size_t in_size = stride;
+    for (size_t idx = 0; idx < in_size; idx++) {
+        size_t tmp = idx;
+        size_t out_idx = 0;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; d--) {
+            size_t coord = tmp % static_cast<size_t>(shape[d]);
+            tmp /= static_cast<size_t>(shape[d]);
+            if (!reduce_axis[d]) {
+                int out_d = 0;
+                for (int k = 0; k < d; k++) {
+                    if (!reduce_axis[k]) out_d++;
+                }
+                size_t os = 1;
+                for (size_t k = out_d + 1; k < out_shape.size(); k++) {
+                    os *= static_cast<size_t>(out_shape[k]);
+                }
+                out_idx += coord * os;
+            }
+        }
+        if (in[idx] < out[out_idx]) {
+            out[out_idx] = in[idx];
+        }
+    }
+}
+
+// =============================================================================
+// Axis Reduction API
+// =============================================================================
+
 LuxTensor* lux_tensor_sum(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes) {
-    (void)gpu; (void)axes; (void)naxes;
-    // Return copy of input for now - proper reduction not yet implemented
-    if (!t) return nullptr;
-    return lux_tensor_from_data(gpu, t->host_data.data(), t->shape.data(),
-                                 static_cast<int>(t->shape.size()), t->dtype);
+    if (!gpu || !gpu->vtbl || !t || !axes || naxes <= 0) return nullptr;
+
+    std::vector<int64_t> out_shape = compute_reduced_shape(t->shape, axes, naxes);
+    auto out = lux_tensor_zeros(gpu, out_shape.data(), static_cast<int>(out_shape.size()), t->dtype);
+    if (!out) return nullptr;
+
+    // Try backend dispatch for single last-axis reduction
+    size_t outer_size, inner_size;
+    if (gpu->vtbl->op_reduce_sum_axis_f32 &&
+        can_use_axis_reduction(t->shape, axes, naxes, &outer_size, &inner_size) &&
+        t->device_buffer && out->device_buffer) {
+        LuxBackendError err = gpu->vtbl->op_reduce_sum_axis_f32(
+            gpu->ctx, t->device_buffer, out->device_buffer, outer_size, inner_size);
+        if (err == LUX_BACKEND_OK) return out;
+    }
+
+    // CPU fallback: sync input to host, compute, sync output to device
+    std::vector<float> in_data(t->size());
+    lux_tensor_to_host(t, in_data.data(), in_data.size() * sizeof(float));
+
+    std::vector<float> out_data(out->size());
+    cpu_reduce_sum_axes(in_data.data(), out_data.data(), t->shape, axes, naxes, out_shape);
+
+    // Copy result to output tensor host_data and device
+    std::memcpy(out->host_data.data(), out_data.data(), out_data.size() * sizeof(float));
+    if (out->device_buffer && gpu->vtbl->buffer_copy_from_host) {
+        gpu->vtbl->buffer_copy_from_host(gpu->ctx, out->device_buffer,
+                                          out_data.data(), out_data.size() * sizeof(float));
+    }
+
+    return out;
 }
 
 LuxTensor* lux_tensor_mean(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes) {
-    (void)gpu; (void)axes; (void)naxes;
-    // Return copy of input for now - proper reduction not yet implemented
-    if (!t) return nullptr;
-    return lux_tensor_from_data(gpu, t->host_data.data(), t->shape.data(),
-                                 static_cast<int>(t->shape.size()), t->dtype);
+    if (!gpu || !gpu->vtbl || !t || !axes || naxes <= 0) return nullptr;
+
+    // Compute sum first
+    LuxTensor* sum_tensor = lux_tensor_sum(gpu, t, axes, naxes);
+    if (!sum_tensor) return nullptr;
+
+    // Compute reduction factor
+    int64_t reduce_count = 1;
+    for (int i = 0; i < naxes; i++) {
+        int ax = axes[i];
+        if (ax < 0) ax += static_cast<int>(t->shape.size());
+        if (ax >= 0 && ax < static_cast<int>(t->shape.size())) {
+            reduce_count *= t->shape[ax];
+        }
+    }
+
+    // Divide by reduction count (in-place on host data)
+    std::vector<float> data(sum_tensor->size());
+    lux_tensor_to_host(sum_tensor, data.data(), data.size() * sizeof(float));
+
+    float scale = 1.0f / static_cast<float>(reduce_count);
+    for (size_t i = 0; i < data.size(); i++) {
+        data[i] *= scale;
+    }
+
+    std::memcpy(sum_tensor->host_data.data(), data.data(), data.size() * sizeof(float));
+    if (sum_tensor->device_buffer && gpu->vtbl->buffer_copy_from_host) {
+        gpu->vtbl->buffer_copy_from_host(gpu->ctx, sum_tensor->device_buffer,
+                                          data.data(), data.size() * sizeof(float));
+    }
+
+    return sum_tensor;
 }
 
 LuxTensor* lux_tensor_max(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes) {
-    (void)gpu; (void)axes; (void)naxes;
-    if (!t) return nullptr;
-    return lux_tensor_from_data(gpu, t->host_data.data(), t->shape.data(),
-                                 static_cast<int>(t->shape.size()), t->dtype);
+    if (!gpu || !gpu->vtbl || !t || !axes || naxes <= 0) return nullptr;
+
+    std::vector<int64_t> out_shape = compute_reduced_shape(t->shape, axes, naxes);
+    auto out = lux_tensor_zeros(gpu, out_shape.data(), static_cast<int>(out_shape.size()), t->dtype);
+    if (!out) return nullptr;
+
+    // Try backend dispatch for single last-axis reduction
+    size_t outer_size, inner_size;
+    if (gpu->vtbl->op_reduce_max_axis_f32 &&
+        can_use_axis_reduction(t->shape, axes, naxes, &outer_size, &inner_size) &&
+        t->device_buffer && out->device_buffer) {
+        LuxBackendError err = gpu->vtbl->op_reduce_max_axis_f32(
+            gpu->ctx, t->device_buffer, out->device_buffer, outer_size, inner_size);
+        if (err == LUX_BACKEND_OK) return out;
+    }
+
+    // CPU fallback
+    std::vector<float> in_data(t->size());
+    lux_tensor_to_host(t, in_data.data(), in_data.size() * sizeof(float));
+
+    std::vector<float> out_data(out->size());
+    cpu_reduce_max_axes(in_data.data(), out_data.data(), t->shape, axes, naxes, out_shape);
+
+    std::memcpy(out->host_data.data(), out_data.data(), out_data.size() * sizeof(float));
+    if (out->device_buffer && gpu->vtbl->buffer_copy_from_host) {
+        gpu->vtbl->buffer_copy_from_host(gpu->ctx, out->device_buffer,
+                                          out_data.data(), out_data.size() * sizeof(float));
+    }
+
+    return out;
 }
 
 LuxTensor* lux_tensor_min(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes) {
-    (void)gpu; (void)axes; (void)naxes;
-    if (!t) return nullptr;
-    return lux_tensor_from_data(gpu, t->host_data.data(), t->shape.data(),
-                                 static_cast<int>(t->shape.size()), t->dtype);
+    if (!gpu || !gpu->vtbl || !t || !axes || naxes <= 0) return nullptr;
+
+    std::vector<int64_t> out_shape = compute_reduced_shape(t->shape, axes, naxes);
+    auto out = lux_tensor_zeros(gpu, out_shape.data(), static_cast<int>(out_shape.size()), t->dtype);
+    if (!out) return nullptr;
+
+    // CPU fallback (no backend op_reduce_min_axis_f32 in vtable)
+    std::vector<float> in_data(t->size());
+    lux_tensor_to_host(t, in_data.data(), in_data.size() * sizeof(float));
+
+    std::vector<float> out_data(out->size());
+    cpu_reduce_min_axes(in_data.data(), out_data.data(), t->shape, axes, naxes, out_shape);
+
+    std::memcpy(out->host_data.data(), out_data.data(), out_data.size() * sizeof(float));
+    if (out->device_buffer && gpu->vtbl->buffer_copy_from_host) {
+        gpu->vtbl->buffer_copy_from_host(gpu->ctx, out->device_buffer,
+                                          out_data.data(), out_data.size() * sizeof(float));
+    }
+
+    return out;
 }
 
 // =============================================================================
@@ -788,43 +1092,81 @@ LuxTensor* lux_tensor_copy(LuxGPU* gpu, LuxTensor* t) {
     return out;
 }
 
-// Stream/Event Management (stubs)
+// =============================================================================
+// Stream/Event Management
+// =============================================================================
+//
+// Streams provide ordered execution queues. For CPU backend, operations are
+// synchronous so streams are lightweight handles that track parent context.
+// Events mark points in stream execution for synchronization and timing.
+
+struct LuxStream {
+    LuxGPU* gpu;
+    bool valid;
+
+    explicit LuxStream(LuxGPU* g) : gpu(g), valid(true) {}
+};
+
+struct LuxEvent {
+    LuxGPU* gpu;
+    bool recorded;
+    std::chrono::steady_clock::time_point timestamp;
+
+    explicit LuxEvent(LuxGPU* g) : gpu(g), recorded(false), timestamp() {}
+};
+
 LuxStream* lux_stream_create(LuxGPU* gpu) {
-    (void)gpu;
-    return nullptr;  // Not yet implemented
+    if (!gpu) return nullptr;
+    return new LuxStream(gpu);
 }
 
 void lux_stream_destroy(LuxStream* stream) {
-    (void)stream;
+    delete stream;
 }
 
 LuxError lux_stream_sync(LuxStream* stream) {
-    (void)stream;
+    if (!stream || !stream->valid) return LUX_ERROR_INVALID_ARGUMENT;
+    // For CPU backend, all operations are synchronous - nothing to wait for
+    // For GPU backends, this would dispatch to backend sync
+    if (stream->gpu && stream->gpu->vtbl && stream->gpu->vtbl->sync) {
+        return static_cast<LuxError>(stream->gpu->vtbl->sync(stream->gpu->ctx));
+    }
     return LUX_OK;
 }
 
 LuxEvent* lux_event_create(LuxGPU* gpu) {
-    (void)gpu;
-    return nullptr;
+    if (!gpu) return nullptr;
+    return new LuxEvent(gpu);
 }
 
 void lux_event_destroy(LuxEvent* event) {
-    (void)event;
+    delete event;
 }
 
 LuxError lux_event_record(LuxEvent* event, LuxStream* stream) {
-    (void)event; (void)stream;
+    if (!event) return LUX_ERROR_INVALID_ARGUMENT;
+    // Stream can be null (use default stream)
+    // For CPU: record current time
+    // For GPU: would insert marker into command queue
+    event->timestamp = std::chrono::steady_clock::now();
+    event->recorded = true;
     return LUX_OK;
 }
 
 LuxError lux_event_wait(LuxEvent* event, LuxStream* stream) {
-    (void)event; (void)stream;
+    if (!event || !event->recorded) return LUX_ERROR_INVALID_ARGUMENT;
+    // Stream can be null (use default stream)
+    // For CPU: event is already complete (synchronous execution)
+    // For GPU: would wait until event is signaled
     return LUX_OK;
 }
 
 float lux_event_elapsed(LuxEvent* start, LuxEvent* end) {
-    (void)start; (void)end;
-    return 0.0f;
+    if (!start || !end || !start->recorded || !end->recorded) return 0.0f;
+
+    auto duration = end->timestamp - start->timestamp;
+    // Return elapsed time in milliseconds
+    return std::chrono::duration<float, std::milli>(duration).count();
 }
 
 // NTT Operations
@@ -993,16 +1335,66 @@ LuxError lux_kzg_verify(LuxGPU* gpu, const void* commitment, const void* proof, 
 }
 
 // =============================================================================
-// Stub implementations for high-level BLS functions (require full crypto lib)
+// BLS Signature Operations
 // =============================================================================
+//
+// BLS signatures use BLS12-381 curve with:
+// - G1: 48-byte compressed points (public keys)
+// - G2: 96-byte compressed points (signatures)
+// - Verification: e(pubkey, H(msg)) == e(G1_generator, sig)
+//
+// These functions require the backend to support BLS12-381 pairing operations.
+// Without backend support, they return LUX_ERROR_NOT_SUPPORTED.
+
+// BLS12-381 constants
+static constexpr size_t BLS_G1_COMPRESSED_SIZE = 48;
+static constexpr size_t BLS_G2_COMPRESSED_SIZE = 96;
+static constexpr size_t BLS_G1_UNCOMPRESSED_SIZE = 96;
+static constexpr size_t BLS_G2_UNCOMPRESSED_SIZE = 192;
 
 LuxError lux_bls_verify(LuxGPU* gpu,
                         const uint8_t* sig, size_t sig_len,
                         const uint8_t* msg, size_t msg_len,
                         const uint8_t* pubkey, size_t pubkey_len,
                         bool* result) {
-    (void)gpu; (void)sig; (void)sig_len; (void)msg; (void)msg_len;
-    (void)pubkey; (void)pubkey_len; (void)result;
+    // Validate inputs
+    if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!sig || !msg || !pubkey || !result) return LUX_ERROR_INVALID_ARGUMENT;
+
+    // Check backend supports required operations
+    if (!gpu->vtbl->op_bls12_381_pairing) {
+        gpu->set_error("BLS verify requires BLS12-381 pairing support");
+        return LUX_ERROR_NOT_SUPPORTED;
+    }
+
+    // Validate point sizes
+    // Accept both compressed (48/96) and uncompressed (96/192) formats
+    bool pubkey_compressed = (pubkey_len == BLS_G1_COMPRESSED_SIZE);
+    bool sig_compressed = (sig_len == BLS_G2_COMPRESSED_SIZE);
+
+    if (!pubkey_compressed && pubkey_len != BLS_G1_UNCOMPRESSED_SIZE) {
+        gpu->set_error("Invalid public key size: expected 48 or 96 bytes");
+        return LUX_ERROR_INVALID_ARGUMENT;
+    }
+    if (!sig_compressed && sig_len != BLS_G2_UNCOMPRESSED_SIZE) {
+        gpu->set_error("Invalid signature size: expected 96 or 192 bytes");
+        return LUX_ERROR_INVALID_ARGUMENT;
+    }
+
+    // BLS verification requires hash-to-curve (H(msg) -> G2) and pairing check
+    // Full implementation requires:
+    // 1. Decompress pubkey to G1 point
+    // 2. Hash message to G2 point (hash_to_curve per RFC 9380)
+    // 3. Decompress sig to G2 point
+    // 4. Verify: e(pubkey, H(msg)) == e(G1_generator, sig)
+    //
+    // The backend's pairing operation handles the pairing math.
+    // Hash-to-curve requires field arithmetic not yet in the vtable.
+    //
+    // For now, we return NOT_SUPPORTED with clear error message.
+    // A full implementation would integrate with a crypto library like blst.
+
+    gpu->set_error("BLS verify requires hash-to-curve; integrate blst or similar");
     return LUX_ERROR_NOT_SUPPORTED;
 }
 
@@ -1011,16 +1403,114 @@ LuxError lux_bls_verify_batch(LuxGPU* gpu,
                               const uint8_t* const* msgs, const size_t* msg_lens,
                               const uint8_t* const* pubkeys, const size_t* pubkey_lens,
                               int count, bool* results) {
-    (void)gpu; (void)sigs; (void)sig_lens; (void)msgs; (void)msg_lens;
-    (void)pubkeys; (void)pubkey_lens; (void)count; (void)results;
-    return LUX_ERROR_NOT_SUPPORTED;
+    // Validate inputs
+    if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!sigs || !sig_lens || !msgs || !msg_lens) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!pubkeys || !pubkey_lens || !results) return LUX_ERROR_INVALID_ARGUMENT;
+    if (count <= 0) return LUX_ERROR_INVALID_ARGUMENT;
+
+    // Check backend supports required operations
+    if (!gpu->vtbl->op_bls12_381_pairing) {
+        gpu->set_error("BLS batch verify requires BLS12-381 pairing support");
+        return LUX_ERROR_NOT_SUPPORTED;
+    }
+
+    // Batch verification uses randomized linear combination for efficiency:
+    // Instead of n independent pairing checks, verify:
+    // e(sum(r_i * pubkey_i), H(msg_i)) == e(G1, sum(r_i * sig_i))
+    // where r_i are random scalars.
+    //
+    // This requires the same primitives as single verify plus:
+    // - Scalar multiplication on G1 and G2
+    // - Point addition on G1 and G2
+    //
+    // For now, fall back to sequential verification.
+    for (int i = 0; i < count; i++) {
+        LuxError err = lux_bls_verify(gpu, sigs[i], sig_lens[i],
+                                       msgs[i], msg_lens[i],
+                                       pubkeys[i], pubkey_lens[i],
+                                       &results[i]);
+        if (err != LUX_OK && err != LUX_ERROR_NOT_SUPPORTED) {
+            return err;
+        }
+        // If single verify is not supported, all results are indeterminate
+        if (err == LUX_ERROR_NOT_SUPPORTED) {
+            return err;
+        }
+    }
+    return LUX_OK;
 }
 
 LuxError lux_bls_aggregate(LuxGPU* gpu,
                            const uint8_t* const* sigs, const size_t* sig_lens,
                            int count, uint8_t* out, size_t* out_len) {
-    (void)gpu; (void)sigs; (void)sig_lens; (void)count; (void)out; (void)out_len;
-    return LUX_ERROR_NOT_SUPPORTED;
+    // Validate inputs
+    if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!sigs || !sig_lens || !out || !out_len) return LUX_ERROR_INVALID_ARGUMENT;
+    if (count <= 0) return LUX_ERROR_INVALID_ARGUMENT;
+
+    // Check backend supports required operations
+    if (!gpu->vtbl->op_bls12_381_add) {
+        gpu->set_error("BLS aggregate requires BLS12-381 point addition");
+        return LUX_ERROR_NOT_SUPPORTED;
+    }
+
+    // Validate all signatures have consistent size
+    size_t first_len = sig_lens[0];
+    bool compressed = (first_len == BLS_G2_COMPRESSED_SIZE);
+    if (!compressed && first_len != BLS_G2_UNCOMPRESSED_SIZE) {
+        gpu->set_error("Invalid signature size");
+        return LUX_ERROR_INVALID_ARGUMENT;
+    }
+
+    for (int i = 1; i < count; i++) {
+        if (sig_lens[i] != first_len) {
+            gpu->set_error("All signatures must have same size for aggregation");
+            return LUX_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    // Aggregation: agg_sig = sig_1 + sig_2 + ... + sig_n (G2 point addition)
+    // For compressed points, we need to decompress, add, recompress.
+    // The backend add operation works on uncompressed points.
+
+    if (compressed) {
+        // Compressed format requires decompression - not yet implemented
+        gpu->set_error("Compressed signature aggregation requires point decompression");
+        return LUX_ERROR_NOT_SUPPORTED;
+    }
+
+    // Uncompressed format: direct G2 addition
+    // Allocate working buffer for accumulator
+    std::vector<uint8_t> acc(BLS_G2_UNCOMPRESSED_SIZE);
+    std::memcpy(acc.data(), sigs[0], BLS_G2_UNCOMPRESSED_SIZE);
+
+    for (int i = 1; i < count; i++) {
+        std::vector<uint8_t> result(BLS_G2_UNCOMPRESSED_SIZE);
+        LuxBackendError err = gpu->vtbl->op_bls12_381_add(
+            gpu->ctx,
+            acc.data(),      // a
+            sigs[i],         // b
+            result.data(),   // out
+            1,               // count
+            true             // is_g2
+        );
+        if (err != LUX_BACKEND_OK) {
+            gpu->set_error("G2 point addition failed during aggregation");
+            return static_cast<LuxError>(err);
+        }
+        acc = std::move(result);
+    }
+
+    // Copy result
+    if (*out_len < BLS_G2_UNCOMPRESSED_SIZE) {
+        gpu->set_error("Output buffer too small");
+        return LUX_ERROR_INVALID_ARGUMENT;
+    }
+    std::memcpy(out, acc.data(), BLS_G2_UNCOMPRESSED_SIZE);
+    *out_len = BLS_G2_UNCOMPRESSED_SIZE;
+
+    return LUX_OK;
 }
 
 } // extern "C"

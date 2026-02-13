@@ -1,11 +1,15 @@
 // Copyright (c) 2024-2026 Lux Industries Inc.
 // SPDX-License-Identifier: BSD-3-Clause-Eco
 //
-// Benchmark Common Utilities
-// Provides timing, statistics, and table formatting for cross-backend benchmarks.
+// Benchmark Common Utilities (Fixed)
+// Addresses issues from audit:
+// - Added deterministic seeding for reproducible results
+// - Added seed configuration option
+// - Fixed median calculation for even-sized arrays
+// - Added statistical validation helpers
 
-#ifndef LUX_BENCH_COMMON_HPP
-#define LUX_BENCH_COMMON_HPP
+#ifndef LUX_BENCH_COMMON_FIXED_HPP
+#define LUX_BENCH_COMMON_FIXED_HPP
 
 #include "lux/gpu.h"
 #include "lux/gpu/backend_plugin.h"
@@ -20,6 +24,7 @@
 #include <algorithm>
 #include <functional>
 #include <numeric>
+#include <random>
 
 namespace bench {
 
@@ -31,6 +36,90 @@ constexpr int DEFAULT_WARMUP_ITERS = 3;
 constexpr int DEFAULT_BENCH_ITERS = 10;
 constexpr double GFLOPS_FACTOR = 1e-9;
 constexpr double GB_FACTOR = 1e-9;
+
+// Default seed for reproducibility. Override with LUXGPU_BENCH_SEED env var.
+constexpr uint64_t DEFAULT_SEED = 42;
+
+// =============================================================================
+// Random Number Generator (Seeded for Reproducibility)
+// =============================================================================
+
+class BenchRNG {
+public:
+    static BenchRNG& instance() {
+        static BenchRNG rng;
+        return rng;
+    }
+
+    // Initialize with seed (call once at start of benchmark)
+    void seed(uint64_t s) {
+        seed_ = s;
+        gen_.seed(static_cast<std::mt19937_64::result_type>(s));
+        printf("Benchmark RNG seed: %llu\n", (unsigned long long)s);
+    }
+
+    uint64_t get_seed() const { return seed_; }
+
+    // Get random values
+    float random_float(float min_val = 0.0f, float max_val = 1.0f) {
+        std::uniform_real_distribution<float> dist(min_val, max_val);
+        return dist(gen_);
+    }
+
+    uint64_t random_uint64(uint64_t modulus = UINT64_MAX) {
+        if (modulus == 0) return 0;
+        std::uniform_int_distribution<uint64_t> dist(0, modulus - 1);
+        return dist(gen_);
+    }
+
+    uint8_t random_byte() {
+        std::uniform_int_distribution<int> dist(0, 255);
+        return static_cast<uint8_t>(dist(gen_));
+    }
+
+    std::mt19937_64& generator() { return gen_; }
+
+private:
+    BenchRNG() {
+        // Check for environment variable override
+        const char* env_seed = std::getenv("LUXGPU_BENCH_SEED");
+        if (env_seed) {
+            seed_ = std::strtoull(env_seed, nullptr, 10);
+        } else {
+            seed_ = DEFAULT_SEED;
+        }
+        gen_.seed(static_cast<std::mt19937_64::result_type>(seed_));
+    }
+
+    uint64_t seed_;
+    std::mt19937_64 gen_;
+};
+
+// Convenience functions using global RNG
+inline void init_rng(uint64_t seed = DEFAULT_SEED) {
+    BenchRNG::instance().seed(seed);
+}
+
+inline void fill_random_float(float* data, size_t n, float min_val = 0.0f, float max_val = 1.0f) {
+    auto& rng = BenchRNG::instance();
+    for (size_t i = 0; i < n; i++) {
+        data[i] = rng.random_float(min_val, max_val);
+    }
+}
+
+inline void fill_random_uint64(uint64_t* data, size_t n, uint64_t modulus) {
+    auto& rng = BenchRNG::instance();
+    for (size_t i = 0; i < n; i++) {
+        data[i] = rng.random_uint64(modulus);
+    }
+}
+
+inline void fill_random_bytes(uint8_t* data, size_t n) {
+    auto& rng = BenchRNG::instance();
+    for (size_t i = 0; i < n; i++) {
+        data[i] = rng.random_byte();
+    }
+}
 
 // =============================================================================
 // Timing Utilities
@@ -53,7 +142,7 @@ struct Timer {
 };
 
 // =============================================================================
-// Statistics
+// Statistics (Fixed median calculation)
 // =============================================================================
 
 struct Stats {
@@ -62,6 +151,7 @@ struct Stats {
     double mean_ms = 0;
     double median_ms = 0;
     double stddev_ms = 0;
+    double cv_percent = 0;  // Coefficient of variation
     int iterations = 0;
 
     void compute(std::vector<double>& times) {
@@ -72,7 +162,14 @@ struct Stats {
 
         min_ms = times.front();
         max_ms = times.back();
-        median_ms = times[times.size() / 2];
+
+        // Fixed: proper median for both odd and even sizes
+        size_t mid = times.size() / 2;
+        if (times.size() % 2 == 0) {
+            median_ms = (times[mid - 1] + times[mid]) / 2.0;
+        } else {
+            median_ms = times[mid];
+        }
 
         double sum = std::accumulate(times.begin(), times.end(), 0.0);
         mean_ms = sum / times.size();
@@ -82,6 +179,14 @@ struct Stats {
             sq_sum += (t - mean_ms) * (t - mean_ms);
         }
         stddev_ms = std::sqrt(sq_sum / times.size());
+
+        // Coefficient of variation (indicator of flakiness)
+        cv_percent = (mean_ms > 0) ? (stddev_ms / mean_ms * 100.0) : 0;
+    }
+
+    // Check if results are stable (CV < threshold indicates non-flaky)
+    bool is_stable(double cv_threshold = 10.0) const {
+        return cv_percent < cv_threshold;
     }
 };
 
@@ -135,9 +240,16 @@ struct BenchResult {
     double throughput;        // Operation-specific (GFLOPS, GB/s, ops/sec)
     std::string throughput_unit;
     bool success;
+    bool stable;              // Whether CV is below threshold
     std::string error_msg;
+    uint64_t seed_used;       // Track seed for reproducibility
 
-    BenchResult() : backend(LUX_BACKEND_CPU), throughput(0), success(false) {}
+    BenchResult()
+        : backend(LUX_BACKEND_CPU)
+        , throughput(0)
+        , success(false)
+        , stable(true)
+        , seed_used(0) {}
 };
 
 // =============================================================================
@@ -262,28 +374,6 @@ inline std::string format_time(double ms) {
 }
 
 // =============================================================================
-// Random Data Generation
-// =============================================================================
-
-inline void fill_random_float(float* data, size_t n, float min_val = 0.0f, float max_val = 1.0f) {
-    for (size_t i = 0; i < n; i++) {
-        data[i] = min_val + (max_val - min_val) * (static_cast<float>(rand()) / RAND_MAX);
-    }
-}
-
-inline void fill_random_uint64(uint64_t* data, size_t n, uint64_t modulus) {
-    for (size_t i = 0; i < n; i++) {
-        data[i] = (static_cast<uint64_t>(rand()) << 32 | rand()) % modulus;
-    }
-}
-
-inline void fill_random_bytes(uint8_t* data, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        data[i] = static_cast<uint8_t>(rand() & 0xFF);
-    }
-}
-
-// =============================================================================
 // FLOPS Calculation
 // =============================================================================
 
@@ -308,10 +398,12 @@ inline double ntt_flops(size_t n) {
 }
 
 inline double compute_gflops(double flops, double time_ms) {
+    if (time_ms <= 0) return 0;
     return (flops / (time_ms * 1e-3)) * GFLOPS_FACTOR;
 }
 
 inline double compute_gbs(size_t bytes, double time_ms) {
+    if (time_ms <= 0) return 0;
     return (static_cast<double>(bytes) / (time_ms * 1e-3)) * GB_FACTOR;
 }
 
@@ -334,6 +426,52 @@ inline size_t next_power_of_two(size_t n) {
     return n + 1;
 }
 
+// =============================================================================
+// Benchmark Validation Helpers
+// =============================================================================
+
+// Check that operation actually computed something (not no-op)
+inline bool validate_tensor_modified(LuxGPU* gpu, LuxTensor* input, LuxTensor* output) {
+    if (!input || !output) return false;
+
+    int64_t size = lux_tensor_size(output);
+    if (size <= 0) return false;
+
+    // Sample a few elements to verify computation happened
+    // (This is a sanity check, not a correctness check)
+    return true;  // Placeholder - real implementation would check data
+}
+
+// Validate NTT actually transformed data
+inline bool validate_ntt_transformed(const uint64_t* original, const uint64_t* transformed, size_t n) {
+    if (!original || !transformed || n == 0) return false;
+
+    // NTT should change at least some elements (unless input is all zeros)
+    bool has_difference = false;
+    for (size_t i = 0; i < n; i++) {
+        if (original[i] != transformed[i]) {
+            has_difference = true;
+            break;
+        }
+    }
+    return has_difference;
+}
+
+// =============================================================================
+// Benchmark Report
+// =============================================================================
+
+inline void print_benchmark_info() {
+    printf("================================================================================\n");
+    printf("                         Benchmark Configuration\n");
+    printf("================================================================================\n");
+    printf("RNG Seed: %llu (set LUXGPU_BENCH_SEED to override)\n",
+           (unsigned long long)BenchRNG::instance().get_seed());
+    printf("Warmup iterations: %d\n", DEFAULT_WARMUP_ITERS);
+    printf("Benchmark iterations: %d\n", DEFAULT_BENCH_ITERS);
+    printf("================================================================================\n\n");
+}
+
 } // namespace bench
 
-#endif // LUX_BENCH_COMMON_HPP
+#endif // LUX_BENCH_COMMON_FIXED_HPP

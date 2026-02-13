@@ -5,6 +5,8 @@ includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
 Name: lux-gpu
 Description: Lux GPU - Unified GPU acceleration (Metal/CUDA/Dawn/CPU)
+URL: https://github.com/luxfi/luxcpp
 Version: @PROJECT_VERSION@
-Libs: -L${libdir} -lluxgpu_core
+Libs: -L${libdir} -lluxgpu
+Libs.private: @LUX_GPU_PC_PRIVATE_LIBS@
 Cflags: -I${includedir}

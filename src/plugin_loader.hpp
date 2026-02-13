@@ -11,6 +11,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <mutex>
 
 namespace lux::gpu {
 
@@ -97,6 +98,7 @@ private:
         init_from_environment();
     }
 
+    mutable std::mutex mutex_;  // Protects search_paths_ and backends_
     std::vector<std::string> search_paths_;
     std::unordered_map<std::string, std::unique_ptr<LoadedBackend>> backends_;
 
@@ -163,6 +165,8 @@ inline void PluginLoader::scan_directory(const std::string& dir) {
 }
 
 inline bool PluginLoader::load_backend(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     // Already loaded?
     if (backends_.count(name)) {
         return backends_[name]->available;
@@ -170,12 +174,54 @@ inline bool PluginLoader::load_backend(const std::string& name) {
 
     std::string filename = "libluxgpu_backend_" + name + DYLIB_EXT;
 
-    // Search in all paths
-    for (const auto& dir : search_paths_) {
+    // Copy search paths under lock, then search
+    std::vector<std::string> paths = search_paths_;
+
+    // Search in all paths (mutex released during dlopen for better concurrency)
+    for (const auto& dir : paths) {
         std::string full_path = dir + "/" + filename;
-        if (load_backend_from_path(full_path)) {
-            return true;
+        // Note: load_backend_from_path_unlocked would be better but requires refactor
+        // For now, we hold the lock through loading
+        DylibHandle handle = open_library(full_path);
+        if (!handle) continue;
+
+        auto init_fn = reinterpret_cast<lux_gpu_backend_init_fn>(
+            get_symbol(handle, LUX_GPU_BACKEND_INIT_SYMBOL)
+        );
+
+        if (!init_fn) {
+#ifdef _WIN32
+            FreeLibrary(handle);
+#else
+            dlclose(handle);
+#endif
+            continue;
         }
+
+        auto backend = std::make_unique<LoadedBackend>();
+        backend->path = full_path;
+        backend->handle = handle;
+
+        if (!init_fn(&backend->desc)) {
+            backend->available = false;
+        } else {
+            if (backend->desc.abi_version != LUX_GPU_BACKEND_ABI_VERSION) {
+                fprintf(stderr, "lux-gpu: backend %s has ABI version %u, expected %u\n",
+                        full_path.c_str(), backend->desc.abi_version, LUX_GPU_BACKEND_ABI_VERSION);
+#ifdef _WIN32
+                FreeLibrary(handle);
+#else
+                dlclose(handle);
+#endif
+                continue;
+            }
+            backend->available = true;
+        }
+
+        backend->name = backend->desc.backend_name ? backend->desc.backend_name : "unknown";
+        bool available = backend->available;
+        backends_[backend->name] = std::move(backend);
+        return available;
     }
 
     return false;
@@ -232,6 +278,7 @@ inline bool PluginLoader::load_backend_from_path(const std::string& path) {
 }
 
 inline std::vector<std::string> PluginLoader::available_backends() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> result;
     result.push_back("cpu");  // Always available
     for (const auto& [name, backend] : backends_) {
@@ -243,11 +290,13 @@ inline std::vector<std::string> PluginLoader::available_backends() const {
 }
 
 inline const LoadedBackend* PluginLoader::get_backend(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = backends_.find(name);
     return (it != backends_.end() && it->second->available) ? it->second.get() : nullptr;
 }
 
 inline const LoadedBackend* PluginLoader::get_best_backend() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     // Priority order
     static const char* priority[] = {"metal", "cuda", "webgpu"};
 
@@ -263,6 +312,7 @@ inline const LoadedBackend* PluginLoader::get_best_backend() const {
 
 inline bool PluginLoader::is_available(const std::string& name) const {
     if (name == "cpu") return true;
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = backends_.find(name);
     return it != backends_.end() && it->second->available;
 }

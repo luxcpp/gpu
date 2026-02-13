@@ -30,7 +30,9 @@ if(DEBUG)
     set(CMAKE_CXX_FLAGS "-O0 -g")
 endif()
 
-if(WIN64)
+# Windows x64: WIN32 is defined for both 32 and 64-bit on Windows
+# Use CMAKE_SIZEOF_VOID_P == 8 to detect 64-bit
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DWEBGPU_BACKEND_DAWN")
 endif()
 
@@ -42,9 +44,9 @@ message(
         "Include directories for wgpu: ${CMAKE_CURRENT_SOURCE_DIR}/third_party/headers"
 )
 
-add_library(gpud SHARED gpu.hpp)
-set_target_properties(gpud PROPERTIES LINKER_LANGUAGE CXX)
-target_link_libraries(gpud PRIVATE wgpu)
-target_link_libraries(gpud PRIVATE webgpu)
-target_link_libraries(gpud PRIVATE gpu)
-install(TARGETS gpud)
+# Note: gpu.hpp is a header-only library, gpud is an interface library
+# that aggregates the dependencies for consumers
+add_library(gpud INTERFACE)
+target_link_libraries(gpud INTERFACE wgpu webgpu gpu)
+target_include_directories(gpud INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+install(FILES gpu.hpp DESTINATION include/lux/gpu/webgpu)

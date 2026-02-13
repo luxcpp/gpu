@@ -26,19 +26,25 @@ const MONT_INV: u32 = 0xefffffff;
 
 // R^2 mod p (for converting to Montgomery form)
 // R = 2^256, R^2 mod p precomputed
-const R2_MOD_0: u32 = 0x1bb8e645u;
-const R2_MOD_1: u32 = 0xe0a77c19u;
-const R2_MOD_2: u32 = 0x59aa76feu;
-const R2_MOD_3: u32 = 0x28b7fa0cu;
-const R2_MOD_4: u32 = 0xf6d93f08u;
-const R2_MOD_5: u32 = 0x9e5e9c7cu;
-const R2_MOD_6: u32 = 0x8c7e67d2u;
-const R2_MOD_7: u32 = 0x0216d0b1u;
+// Must match C++ BN254_R2: {0xf32cfc5b538afa89, 0xb5e71911d44501fb, 0x47ab1eff0a417ff6, 0x06d89f71cab8351f}
+// Split into 32-bit limbs (little-endian): each 64-bit value splits as [lo32, hi32]
+const R2_MOD_0: u32 = 0x538afa89u;  // low32 of 0xf32cfc5b538afa89
+const R2_MOD_1: u32 = 0xf32cfc5bu;  // high32 of 0xf32cfc5b538afa89
+const R2_MOD_2: u32 = 0xd44501fbu;  // low32 of 0xb5e71911d44501fb
+const R2_MOD_3: u32 = 0xb5e71911u;  // high32 of 0xb5e71911d44501fb
+const R2_MOD_4: u32 = 0x0a417ff6u;  // low32 of 0x47ab1eff0a417ff6
+const R2_MOD_5: u32 = 0x47ab1effu;  // high32 of 0x47ab1eff0a417ff6
+const R2_MOD_6: u32 = 0xcab8351fu;  // low32 of 0x06d89f71cab8351f
+const R2_MOD_7: u32 = 0x06d89f71u;  // high32 of 0x06d89f71cab8351f
 
 // Poseidon2 parameters for t=3 on BN254
-const POSEIDON2_RF: u32 = 8u;   // Full rounds
+// Must match C++ zk_ops.cpp: RF=8, RP=56, t=3
+const POSEIDON2_RF: u32 = 8u;   // Full rounds (4 before partial, 4 after)
 const POSEIDON2_RP: u32 = 56u;  // Partial rounds
 const POSEIDON2_T: u32 = 3u;    // State width
+
+// Round constant count: (RF/2)*t + RP + (RF/2)*t = 4*3 + 56 + 4*3 = 80
+// Internal diagonal D = [1, 1, 2] (matches C++ INTERNAL_DIAG)
 
 // Fr256 as 8 x u32 limbs (little-endian)
 struct Fr256 {
@@ -329,14 +335,17 @@ fn fr_mul_mont(a: Fr256, b: Fr256) -> Fr256 {
     return mont_reduce(product);
 }
 
-// Standard multiplication for non-Montgomery form (used in Poseidon)
+// Field multiplication using Montgomery form
+// For Poseidon2, all field elements are kept in Montgomery form.
+// a_mont * b_mont via Montgomery = (a*R) * (b*R) * R^-1 mod p = a*b*R mod p
+// This is the Montgomery product, result stays in Montgomery form.
 fn fr_mul(a: Fr256, b: Fr256) -> Fr256 {
     var product: array<u32, 16>;
     for (var i = 0u; i < 16u; i = i + 1u) {
         product[i] = 0u;
     }
 
-    // Schoolbook multiplication
+    // Schoolbook multiplication: a * b -> 512-bit product
     for (var i = 0u; i < 8u; i = i + 1u) {
         var carry: u32 = 0u;
         for (var j = 0u; j < 8u; j = j + 1u) {
@@ -347,55 +356,8 @@ fn fr_mul(a: Fr256, b: Fr256) -> Fr256 {
         product[i + 8u] = carry;
     }
 
-    // Barrett-like reduction for product mod p
-    // For 512-bit number T, compute T mod p
-    // Simplified: repeated subtraction for upper bits
-    return barrett_reduce(product);
-}
-
-// Barrett reduction for 512-bit product
-fn barrett_reduce(t: array<u32, 16>) -> Fr256 {
-    // For BN254, we need to reduce a 512-bit number mod 254-bit prime
-    // We use the fact that 2^256 = 2^256 - p + p, and compute reduction iteratively
-
-    var mod_arr: array<u32, 8>;
-    mod_arr[0] = BN254_MOD_0;
-    mod_arr[1] = BN254_MOD_1;
-    mod_arr[2] = BN254_MOD_2;
-    mod_arr[3] = BN254_MOD_3;
-    mod_arr[4] = BN254_MOD_4;
-    mod_arr[5] = BN254_MOD_5;
-    mod_arr[6] = BN254_MOD_6;
-    mod_arr[7] = BN254_MOD_7;
-
-    // Split t into lo (256 bits) and hi (256 bits)
-    var lo: Fr256;
-    var hi: Fr256;
-    for (var i = 0u; i < 8u; i = i + 1u) {
-        lo.limbs[i] = t[i];
-        hi.limbs[i] = t[i + 8u];
-    }
-
-    // If hi is zero, just reduce lo
-    var hi_zero = true;
-    for (var i = 0u; i < 8u; i = i + 1u) {
-        if (hi.limbs[i] != 0u) {
-            hi_zero = false;
-            break;
-        }
-    }
-
-    if (hi_zero) {
-        return fr_reduce(lo);
-    }
-
-    // Compute: result = lo + hi * (2^256 mod p)
-    // 2^256 mod p = 2^256 - p (since p < 2^256)
-    // k = 2^256 - p = 0xcf9cc82b0d17d3f67ef7c9f6b85ee0a3d7cc4f6d86493c7ebc1e0a6d0fffffffe
-    // But this is still 256 bits, so we need to be careful
-
-    // Alternative: use Montgomery reduction directly
-    return mont_reduce(t);
+    // Montgomery reduction: product * R^-1 mod p
+    return mont_reduce(product);
 }
 
 // Square Fr256
@@ -403,48 +365,33 @@ fn fr_square(a: Fr256) -> Fr256 {
     return fr_mul(a, a);
 }
 
-// Multiply Fr256 by small scalar (for matrix operations)
-fn fr_mul_small(a: Fr256, s: u32) -> Fr256 {
-    var result: Fr256;
-    var carry: u32 = 0u;
+// Convert to Montgomery form: a -> a*R mod p
+// Computed as a * R^2 * R^-1 = a * R mod p
+fn to_montgomery(a: Fr256) -> Fr256 {
+    var r2: Fr256;
+    r2.limbs[0] = R2_MOD_0;
+    r2.limbs[1] = R2_MOD_1;
+    r2.limbs[2] = R2_MOD_2;
+    r2.limbs[3] = R2_MOD_3;
+    r2.limbs[4] = R2_MOD_4;
+    r2.limbs[5] = R2_MOD_5;
+    r2.limbs[6] = R2_MOD_6;
+    r2.limbs[7] = R2_MOD_7;
+    return fr_mul(a, r2);
+}
 
+// Convert from Montgomery form: a_mont -> a_mont * R^-1 mod p = a
+fn from_montgomery(a: Fr256) -> Fr256 {
+    var one: array<u32, 16>;
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        one[i] = 0u;
+    }
+    // Copy a into lower 8 limbs, upper 8 are zero
     for (var i = 0u; i < 8u; i = i + 1u) {
-        let mc = mac(a.limbs[i], s, 0u, carry);
-        result.limbs[i] = mc.x;
-        carry = mc.y;
+        one[i] = a.limbs[i];
     }
-
-    // Handle overflow - if carry, need to reduce
-    if (carry > 0u) {
-        // For small s, we might overflow by at most s*p
-        // Reduce iteratively
-        var mod_arr: array<u32, 8>;
-        mod_arr[0] = BN254_MOD_0;
-        mod_arr[1] = BN254_MOD_1;
-        mod_arr[2] = BN254_MOD_2;
-        mod_arr[3] = BN254_MOD_3;
-        mod_arr[4] = BN254_MOD_4;
-        mod_arr[5] = BN254_MOD_5;
-        mod_arr[6] = BN254_MOD_6;
-        mod_arr[7] = BN254_MOD_7;
-
-        while (carry > 0u || fr_geq(result, mod_arr)) {
-            var borrow: u32 = 0u;
-            for (var i = 0u; i < 8u; i = i + 1u) {
-                let sb = sbb(result.limbs[i], mod_arr[i], borrow);
-                result.limbs[i] = sb.x;
-                borrow = sb.y;
-            }
-            if (carry >= borrow) {
-                carry = carry - borrow;
-            } else {
-                // Underflow - should not happen if inputs are valid
-                break;
-            }
-        }
-    }
-
-    return fr_reduce(result);
+    // mont_reduce computes T * R^-1 mod p
+    return mont_reduce(one);
 }
 
 // ============================================================================
@@ -469,14 +416,20 @@ fn apply_external_matrix(state: ptr<function, Poseidon2State>) {
 }
 
 // Apply Poseidon2 internal matrix M_I for t=3
-// M_I has diagonal [1+D, 1, 1] where D is derived from security analysis
-// For BN254 t=3: D = 1, so diagonal is [2, 1, 1]
-// M_I * [s0, s1, s2] = [2*s0 + s1 + s2, s0 + s1 + s2, s0 + s1 + s2]
+// M_I = diag(d_0, d_1, d_2) + J where J is all-ones matrix
+// For BN254 t=3: D = [1, 1, 2] (matches C++ INTERNAL_DIAG)
+// s[i] = d[i] * s[i] + sum
+// Result: s0 = 1*s0 + sum, s1 = 1*s1 + sum, s2 = 2*s2 + sum
 fn apply_internal_matrix(state: ptr<function, Poseidon2State>) {
     let sum = fr_add(fr_add((*state).s0, (*state).s1), (*state).s2);
-    (*state).s0 = fr_add((*state).s0, sum); // s0 + sum = 2*s0 + s1 + s2
-    (*state).s1 = sum;
-    (*state).s2 = sum;
+
+    // d[0] = 1: s0 = s0 + sum
+    (*state).s0 = fr_add((*state).s0, sum);
+    // d[1] = 1: s1 = s1 + sum
+    (*state).s1 = fr_add((*state).s1, sum);
+    // d[2] = 2: s2 = 2*s2 + sum
+    let s2_doubled = fr_add((*state).s2, (*state).s2);
+    (*state).s2 = fr_add(s2_doubled, sum);
 }
 
 // Full round: S-box on all state elements, then external matrix
@@ -508,10 +461,16 @@ fn partial_round(state: ptr<function, Poseidon2State>, rc_offset: u32) {
 }
 
 // Poseidon2 hash: H(left, right) -> output
+// CONTRACT:
+// - Inputs (left, right) must be in Montgomery form
+// - Round constants must be in Montgomery form
+// - Output is in Montgomery form
+// - Caller must convert to/from Montgomery form as needed
 fn poseidon2_hash(left: Fr256, right: Fr256) -> Fr256 {
     var state: Poseidon2State;
 
     // Initialize state: [0, left, right] (domain separation)
+    // Note: 0 in standard form = 0 in Montgomery form
     for (var i = 0u; i < 8u; i = i + 1u) {
         state.s0.limbs[i] = 0u;
     }

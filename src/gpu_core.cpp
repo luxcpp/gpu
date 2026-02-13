@@ -3,15 +3,13 @@
 //
 // Core GPU Library - Plugin-based backend management
 
-#include "lux/gpu.h"
-#include "lux/gpu/backend_plugin.h"
+#include "gpu_internal.h"
 #include "plugin_loader.hpp"
 #include <chrono>
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <mutex>
-#include <string>
+#include <vector>
 
 // =============================================================================
 // Built-in CPU backend declaration
@@ -20,27 +18,19 @@
 extern "C" bool cpu_backend_init(lux_gpu_backend_desc* out);
 
 // =============================================================================
-// GPU Context Implementation
+// LuxGPU Implementation (declared in gpu_internal.h)
 // =============================================================================
 
-struct LuxGPU {
-    std::string backend_name;
-    const lux_gpu_backend_vtbl* vtbl = nullptr;
-    LuxBackendContext* ctx = nullptr;
-    std::string last_error;
-    std::mutex mutex;
-
-    ~LuxGPU() {
-        if (ctx && vtbl && vtbl->destroy_context) {
-            vtbl->destroy_context(ctx);
-        }
+LuxGPU::~LuxGPU() {
+    if (ctx && vtbl && vtbl->destroy_context) {
+        vtbl->destroy_context(ctx);
     }
+}
 
-    void set_error(const char* msg) {
-        std::lock_guard<std::mutex> lock(mutex);
-        last_error = msg ? msg : "";
-    }
-};
+void LuxGPU::set_error(const char* msg) {
+    std::lock_guard<std::mutex> lock(mutex);
+    last_error = msg ? msg : "";
+}
 
 // =============================================================================
 // Tensor wrapper (bridges plugin buffers to public API)
@@ -54,10 +44,23 @@ struct LuxTensor {
     const lux_gpu_backend_vtbl* vtbl = nullptr;
     LuxBackendContext* ctx = nullptr;
 
+    // Returns total number of elements, or -1 on overflow
     int64_t size() const {
         int64_t s = 1;
-        for (auto d : shape) s *= d;
+        for (auto d : shape) {
+            // Check for overflow before multiplication
+            if (d <= 0) return 0;
+            if (s > std::numeric_limits<int64_t>::max() / d) {
+                return -1;  // Overflow
+            }
+            s *= d;
+        }
         return s;
+    }
+
+    // Safe size check - returns false on overflow or invalid size
+    bool size_valid() const {
+        return size() > 0;
     }
 
     size_t element_size() const {
@@ -220,7 +223,7 @@ LuxError lux_gpu_set_backend(LuxGPU* gpu, LuxBackend backend) {
 
     // Create new context for requested backend
     auto* new_gpu = lux_gpu_create_with_backend(backend);
-    if (!new_gpu || new_gpu->backend_name == "cpu" && backend != LUX_BACKEND_CPU && backend != LUX_BACKEND_AUTO) {
+    if (!new_gpu || (new_gpu->backend_name == "cpu" && backend != LUX_BACKEND_CPU && backend != LUX_BACKEND_AUTO)) {
         delete new_gpu;
         return LUX_ERROR_BACKEND_NOT_AVAILABLE;
     }
@@ -294,6 +297,125 @@ const char* lux_backend_name(LuxBackend backend) {
     }
 }
 
+int lux_device_count(LuxBackend backend) {
+    std::call_once(g_init_flag, global_init);
+    auto& loader = lux::gpu::PluginLoader::instance();
+
+    if (backend == LUX_BACKEND_CPU) {
+        return 1;  // CPU always has one "device"
+    }
+
+    const char* name = nullptr;
+    switch (backend) {
+        case LUX_BACKEND_METAL: name = "metal"; break;
+        case LUX_BACKEND_CUDA: name = "cuda"; break;
+        case LUX_BACKEND_DAWN: name = "webgpu"; break;
+        default: return 0;
+    }
+
+    if (!loader.is_available(name)) {
+        if (!loader.load_backend(name)) {
+            return 0;
+        }
+    }
+
+    const auto* b = loader.get_backend(name);
+    if (!b || !b->desc.vtbl || !b->desc.vtbl->get_device_count) {
+        return 0;
+    }
+
+    int count = 0;
+    if (b->desc.vtbl->get_device_count(&count) == LUX_BACKEND_OK) {
+        return count;
+    }
+    return 0;
+}
+
+LuxError lux_device_info(LuxBackend backend, int index, LuxDeviceInfo* info) {
+    if (!info) return LUX_ERROR_INVALID_ARGUMENT;
+
+    std::call_once(g_init_flag, global_init);
+    auto& loader = lux::gpu::PluginLoader::instance();
+
+    if (backend == LUX_BACKEND_CPU) {
+        // CPU backend info
+        info->backend = LUX_BACKEND_CPU;
+        info->index = 0;
+        info->name = "CPU";
+        info->vendor = "Host";
+        info->memory_total = 0;
+        info->memory_available = 0;
+        info->is_discrete = false;
+        info->is_unified_memory = true;
+        info->compute_units = 1;
+        info->max_workgroup_size = 1;
+        return LUX_OK;
+    }
+
+    const char* name = nullptr;
+    switch (backend) {
+        case LUX_BACKEND_METAL: name = "metal"; break;
+        case LUX_BACKEND_CUDA: name = "cuda"; break;
+        case LUX_BACKEND_DAWN: name = "webgpu"; break;
+        default: return LUX_ERROR_BACKEND_NOT_AVAILABLE;
+    }
+
+    if (!loader.is_available(name)) {
+        if (!loader.load_backend(name)) {
+            return LUX_ERROR_BACKEND_NOT_AVAILABLE;
+        }
+    }
+
+    const auto* b = loader.get_backend(name);
+    if (!b || !b->desc.vtbl) {
+        return LUX_ERROR_BACKEND_NOT_AVAILABLE;
+    }
+
+    // Create temporary context for device info query
+    // NOTE: The returned name/vendor pointers must be static strings in the backend.
+    // Backend implementations must not return pointers to context-owned memory.
+    if (!b->desc.vtbl->create_context) {
+        return LUX_ERROR_NOT_SUPPORTED;
+    }
+
+    LuxBackendContext* ctx = b->desc.vtbl->create_context(index);
+    if (!ctx) {
+        return LUX_ERROR_DEVICE_NOT_FOUND;
+    }
+
+    LuxBackendDeviceInfo binfo = {};
+    LuxBackendError err = LUX_BACKEND_OK;
+    if (b->desc.vtbl->get_device_info) {
+        err = b->desc.vtbl->get_device_info(ctx, &binfo);
+    }
+
+    // Copy string data before destroying context (in case backend returns
+    // context-owned strings - backends should return static strings per contract)
+    const char* saved_name = binfo.name;
+    const char* saved_vendor = binfo.vendor;
+
+    if (b->desc.vtbl->destroy_context) {
+        b->desc.vtbl->destroy_context(ctx);
+    }
+
+    if (err != LUX_BACKEND_OK) {
+        return static_cast<LuxError>(err);
+    }
+
+    info->backend = backend;
+    info->index = index;
+    info->name = saved_name;
+    info->vendor = saved_vendor;
+    info->memory_total = binfo.memory_total;
+    info->memory_available = binfo.memory_available;
+    info->compute_units = binfo.compute_units;
+    info->max_workgroup_size = binfo.max_workgroup_size;
+    info->is_discrete = binfo.is_discrete;
+    info->is_unified_memory = binfo.is_unified_memory;
+
+    return LUX_OK;
+}
+
 // =============================================================================
 // Tensor Operations
 // =============================================================================
@@ -307,7 +429,20 @@ LuxTensor* lux_tensor_zeros(LuxGPU* gpu, const int64_t* shape, int ndim, LuxDtyp
     t->vtbl = gpu->vtbl;
     t->ctx = gpu->ctx;
 
-    size_t bytes = t->size() * t->element_size();
+    // Check for size overflow
+    int64_t total = t->size();
+    if (total <= 0) {
+        delete t;
+        return nullptr;
+    }
+
+    size_t elem_size = t->element_size();
+    // Check for byte count overflow
+    if (static_cast<uint64_t>(total) > std::numeric_limits<size_t>::max() / elem_size) {
+        delete t;
+        return nullptr;
+    }
+    size_t bytes = static_cast<size_t>(total) * elem_size;
     t->host_data.resize(bytes, 0);
 
     if (gpu->vtbl->buffer_alloc_with_data) {
@@ -332,7 +467,19 @@ LuxTensor* lux_tensor_full(LuxGPU* gpu, const int64_t* shape, int ndim, LuxDtype
     t->vtbl = gpu->vtbl;
     t->ctx = gpu->ctx;
 
-    size_t bytes = t->size() * t->element_size();
+    // Check for size overflow
+    int64_t total = t->size();
+    if (total <= 0) {
+        delete t;
+        return nullptr;
+    }
+
+    size_t elem_size = t->element_size();
+    if (static_cast<uint64_t>(total) > std::numeric_limits<size_t>::max() / elem_size) {
+        delete t;
+        return nullptr;
+    }
+    size_t bytes = static_cast<size_t>(total) * elem_size;
     t->host_data.resize(bytes);
 
     // Fill host data
@@ -359,7 +506,19 @@ LuxTensor* lux_tensor_from_data(LuxGPU* gpu, const void* data, const int64_t* sh
     t->vtbl = gpu->vtbl;
     t->ctx = gpu->ctx;
 
-    size_t bytes = t->size() * t->element_size();
+    // Check for size overflow
+    int64_t total = t->size();
+    if (total <= 0) {
+        delete t;
+        return nullptr;
+    }
+
+    size_t elem_size = t->element_size();
+    if (static_cast<uint64_t>(total) > std::numeric_limits<size_t>::max() / elem_size) {
+        delete t;
+        return nullptr;
+    }
+    size_t bytes = static_cast<size_t>(total) * elem_size;
     t->host_data.resize(bytes);
     std::memcpy(t->host_data.data(), data, bytes);
 
@@ -823,7 +982,25 @@ static void cpu_reduce_min_axes(const float* in, float* out, const std::vector<i
 // =============================================================================
 
 LuxTensor* lux_tensor_sum(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes) {
-    if (!gpu || !gpu->vtbl || !t || !axes || naxes <= 0) return nullptr;
+    if (!gpu || !gpu->vtbl || !t) return nullptr;
+
+    // Global reduction: axes=null && naxes=0
+    if (axes == nullptr || naxes <= 0) {
+        // Return scalar with global sum
+        float sum = lux_tensor_reduce_sum(gpu, t);
+        int64_t one = 1;
+        auto out = lux_tensor_zeros(gpu, &one, 1, t->dtype);
+        if (!out) return nullptr;
+
+        // Set the scalar value
+        float* data = &sum;
+        out->host_data.resize(sizeof(float));
+        std::memcpy(out->host_data.data(), data, sizeof(float));
+        if (out->device_buffer && gpu->vtbl->buffer_copy_from_host) {
+            gpu->vtbl->buffer_copy_from_host(gpu->ctx, out->device_buffer, data, sizeof(float));
+        }
+        return out;
+    }
 
     std::vector<int64_t> out_shape = compute_reduced_shape(t->shape, axes, naxes);
     auto out = lux_tensor_zeros(gpu, out_shape.data(), static_cast<int>(out_shape.size()), t->dtype);
@@ -857,7 +1034,23 @@ LuxTensor* lux_tensor_sum(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes)
 }
 
 LuxTensor* lux_tensor_mean(LuxGPU* gpu, LuxTensor* t, const int* axes, int naxes) {
-    if (!gpu || !gpu->vtbl || !t || !axes || naxes <= 0) return nullptr;
+    if (!gpu || !gpu->vtbl || !t) return nullptr;
+
+    // Global reduction: axes=null && naxes=0
+    if (axes == nullptr || naxes <= 0) {
+        float mean = lux_tensor_reduce_mean(gpu, t);
+        int64_t one = 1;
+        auto out = lux_tensor_zeros(gpu, &one, 1, t->dtype);
+        if (!out) return nullptr;
+
+        float* data = &mean;
+        out->host_data.resize(sizeof(float));
+        std::memcpy(out->host_data.data(), data, sizeof(float));
+        if (out->device_buffer && gpu->vtbl->buffer_copy_from_host) {
+            gpu->vtbl->buffer_copy_from_host(gpu->ctx, out->device_buffer, data, sizeof(float));
+        }
+        return out;
+    }
 
     // Compute sum first
     LuxTensor* sum_tensor = lux_tensor_sum(gpu, t, axes, naxes);

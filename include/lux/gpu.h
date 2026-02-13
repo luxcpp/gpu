@@ -398,6 +398,49 @@ LuxError lux_blind_rotate(LuxGPU* gpu,
                           uint64_t q);                    // Modulus
 
 // =============================================================================
+// ZK Primitives: Field Elements and High-Level Operations
+// =============================================================================
+
+// BN254 scalar field element (Fr) - 256-bit integer in 4 x 64-bit limbs
+// Represents elements of the scalar field of BN254 curve
+typedef struct {
+    uint64_t limbs[4];
+} LuxFr256;
+
+// Poseidon2 compression: out[i] = Poseidon2(left[i], right[i])
+// Poseidon2 is an algebraic hash function optimized for ZK circuits.
+LuxError lux_gpu_poseidon2(LuxGPU* gpu,
+                           LuxFr256* out,
+                           const LuxFr256* left,
+                           const LuxFr256* right,
+                           size_t n);
+
+// Merkle tree root computation using Poseidon2 hash
+// Computes root from n leaves (pads to next power of 2 internally)
+LuxError lux_gpu_merkle_root(LuxGPU* gpu,
+                             LuxFr256* out,
+                             const LuxFr256* leaves,
+                             size_t n);
+
+// Pedersen-style commitment: out[i] = Poseidon2(Poseidon2(value, blinding), salt)
+// Suitable for hiding commitments in ZK protocols
+LuxError lux_gpu_commitment(LuxGPU* gpu,
+                            LuxFr256* out,
+                            const LuxFr256* values,
+                            const LuxFr256* blindings,
+                            const LuxFr256* salts,
+                            size_t n);
+
+// Nullifier derivation: out[i] = Poseidon2(Poseidon2(key, commitment), index)
+// Used to prevent double-spending in ZK protocols
+LuxError lux_gpu_nullifier(LuxGPU* gpu,
+                           LuxFr256* out,
+                           const LuxFr256* keys,
+                           const LuxFr256* commitments,
+                           const LuxFr256* indices,
+                           size_t n);
+
+// =============================================================================
 // Stream/Event Management
 // =============================================================================
 

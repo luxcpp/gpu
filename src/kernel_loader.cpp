@@ -182,6 +182,50 @@ const LuxEmbeddedKernel* lux_kernel_registry_find(
     return nullptr;
 }
 
+// =============================================================================
+// Kernel Compilation API (backend-specific)
+// These are placeholder stubs. Real implementations live in each backend plugin.
+// =============================================================================
+
+LuxKernel* lux_kernel_compile(
+    void* device_context,
+    const LuxKernelSource* source
+) {
+    // Backend-specific implementation required
+    // This stub returns nullptr as the core library cannot compile kernels
+    // without knowing the target backend. Use backend-specific compilation
+    // or load pre-compiled binaries.
+    (void)device_context;
+    (void)source;
+    return nullptr;
+}
+
+LuxKernel* lux_kernel_load_binary(
+    void* device_context,
+    const void* binary,
+    size_t binary_len,
+    const char* entry_point
+) {
+    // Backend-specific implementation required
+    (void)device_context;
+    (void)binary;
+    (void)binary_len;
+    (void)entry_point;
+    return nullptr;
+}
+
+void lux_kernel_destroy(LuxKernel* kernel) {
+    // Kernels are backend-owned; this stub does nothing.
+    // Each backend tracks and destroys its own kernels.
+    (void)kernel;
+}
+
+const char* lux_kernel_entry_point(LuxKernel* kernel) {
+    // Backend-specific; stub returns nullptr
+    (void)kernel;
+    return nullptr;
+}
+
 } // extern "C"
 
 // =============================================================================

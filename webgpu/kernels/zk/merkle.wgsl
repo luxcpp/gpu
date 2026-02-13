@@ -21,8 +21,12 @@ const BN254_MOD_7: u32 = 0x30644e72u;
 const MONT_INV: u32 = 0xefffffff;
 
 // Poseidon2 parameters for t=3 on BN254
-const POSEIDON2_RF: u32 = 8u;
-const POSEIDON2_RP: u32 = 56u;
+// Must match C++ zk_ops.cpp: RF=8, RP=56, t=3
+const POSEIDON2_RF: u32 = 8u;   // Full rounds (4 before partial, 4 after)
+const POSEIDON2_RP: u32 = 56u;  // Partial rounds
+
+// Round constant count: (RF/2)*t + RP + (RF/2)*t = 4*3 + 56 + 4*3 = 80
+// Internal diagonal D = [1, 1, 2] (matches C++ INTERNAL_DIAG)
 
 struct Fr256 {
     limbs: array<u32, 8>,
@@ -267,11 +271,21 @@ fn apply_external_matrix(state: ptr<function, Poseidon2State>) {
     (*state).s2 = fr_add((*state).s2, sum);
 }
 
+// Apply Poseidon2 internal matrix M_I for t=3
+// M_I = diag(d_0, d_1, d_2) + J where J is all-ones matrix
+// For BN254 t=3: D = [1, 1, 2] (matches C++ INTERNAL_DIAG)
+// s[i] = d[i] * s[i] + sum
+// Result: s0 = 1*s0 + sum, s1 = 1*s1 + sum, s2 = 2*s2 + sum
 fn apply_internal_matrix(state: ptr<function, Poseidon2State>) {
     let sum = fr_add(fr_add((*state).s0, (*state).s1), (*state).s2);
+
+    // d[0] = 1: s0 = s0 + sum
     (*state).s0 = fr_add((*state).s0, sum);
-    (*state).s1 = sum;
-    (*state).s2 = sum;
+    // d[1] = 1: s1 = s1 + sum
+    (*state).s1 = fr_add((*state).s1, sum);
+    // d[2] = 2: s2 = 2*s2 + sum
+    let s2_doubled = fr_add((*state).s2, (*state).s2);
+    (*state).s2 = fr_add(s2_doubled, sum);
 }
 
 fn full_round(state: ptr<function, Poseidon2State>, rc_offset: u32) {
@@ -292,9 +306,15 @@ fn partial_round(state: ptr<function, Poseidon2State>, rc_offset: u32) {
     apply_internal_matrix(state);
 }
 
+// Poseidon2 compression: H(left, right) -> output
+// CONTRACT:
+// - Inputs (left, right) must be in Montgomery form
+// - Round constants must be in Montgomery form
+// - Output is in Montgomery form
 fn poseidon2_compress(left: Fr256, right: Fr256) -> Fr256 {
     var state: Poseidon2State;
 
+    // Note: 0 in standard form = 0 in Montgomery form
     for (var i = 0u; i < 8u; i = i + 1u) {
         state.s0.limbs[i] = 0u;
     }

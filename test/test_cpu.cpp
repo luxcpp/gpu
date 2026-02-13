@@ -93,5 +93,18 @@ int main() {
     lux_gpu_destroy(gpu);
 
     printf("\n=== Tests Complete ===\n");
-    return 0;
+
+    // Fixed: Return failure if any test failed
+    int failures = 0;
+    if (result[0] != 3.0f || result[1] != 3.0f || result[2] != 3.0f || result[3] != 3.0f) failures++;
+    if (mat_result[0] != 19.0f || mat_result[1] != 22.0f || mat_result[2] != 43.0f || mat_result[3] != 50.0f) failures++;
+    // NTT roundtrip: check ALL elements, not just first and last
+    bool ntt_ok = true;
+    uint64_t expected_ntt[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    for (int i = 0; i < 8; i++) {
+        if (ntt_data[i] != expected_ntt[i]) ntt_ok = false;
+    }
+    if (!ntt_ok) failures++;
+
+    return failures > 0 ? 1 : 0;
 }

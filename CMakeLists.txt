@@ -34,6 +34,41 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_MACOSX_RPATH ON)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
+# Set install RPATH to find libraries relative to executable
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path/../lib")
+elseif(UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
+endif()
+
+# =============================================================================
+# Compiler Warnings (enabled for all builds)
+# =============================================================================
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    add_compile_options(
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wshadow
+        -Wconversion
+        -Wsign-conversion
+        -Wformat=2
+        -Wdouble-promotion
+        -Wnull-dereference
+        -Wimplicit-fallthrough
+    )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        add_compile_options(
+            -Wduplicated-cond
+            -Wduplicated-branches
+            -Wlogical-op
+        )
+    endif()
+elseif(MSVC)
+    add_compile_options(/W4 /permissive-)
+endif()
+
 # =============================================================================
 # Options
 # =============================================================================
@@ -73,7 +108,7 @@ target_compile_definitions(luxgpu_core_static PRIVATE
 )
 
 set_target_properties(luxgpu_core_static PROPERTIES
-    OUTPUT_NAME "luxgpu_core"
+    OUTPUT_NAME "luxgpu"
     POSITION_INDEPENDENT_CODE ON
 )
 
@@ -107,7 +142,7 @@ if(LUX_GPU_CPU_BACKEND AND LUX_GPU_CPU_USE_OPENMP)
 endif()
 
 set_target_properties(luxgpu_core PROPERTIES
-    OUTPUT_NAME "luxgpu_core"
+    OUTPUT_NAME "luxgpu"
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
 )
@@ -131,8 +166,19 @@ if(LUX_GPU_BUILD_TESTS)
     target_link_libraries(test_zk_ops PRIVATE luxgpu_core)
     add_test(NAME test_zk_ops COMMAND test_zk_ops)
 
+    # Comprehensive coverage test (covers all previously untested APIs)
+    add_executable(test_coverage_complete test/test_coverage_complete.cpp)
+    target_link_libraries(test_coverage_complete PRIVATE luxgpu_core)
+    add_test(NAME test_coverage_complete COMMAND test_coverage_complete)
+
+    # Edge cases and error handling tests
+    add_executable(test_edge_cases test/test_edge_cases.cpp)
+    target_link_libraries(test_edge_cases PRIVATE luxgpu_core)
+    add_test(NAME test_edge_cases COMMAND test_edge_cases)
+
     # Set library path for tests to find plugins
-    set_tests_properties(test_gpu_core test_kernel_loader test_zk_ops PROPERTIES
+    set_tests_properties(test_gpu_core test_kernel_loader test_zk_ops
+                        test_coverage_complete test_edge_cases PROPERTIES
         ENVIRONMENT "LUX_GPU_BACKEND_PATH=${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
@@ -149,6 +195,15 @@ endif()
 # pkg-config
 # =============================================================================
 
+include(GNUInstallDirs)
+
+# Set private libs for static linking
+if(WIN32)
+    set(LUX_GPU_PC_PRIVATE_LIBS "")
+else()
+    set(LUX_GPU_PC_PRIVATE_LIBS "-ldl")
+endif()
+
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/lux-gpu.pc.in
     ${CMAKE_CURRENT_BINARY_DIR}/luxgpu.pc
@@ -158,8 +213,6 @@ configure_file(
 # =============================================================================
 # Install
 # =============================================================================
-
-include(GNUInstallDirs)
 
 install(TARGETS luxgpu_core luxgpu_core_static
     EXPORT luxgpu-targets
@@ -186,16 +239,48 @@ install(EXPORT luxgpu-targets
 )
 
 # =============================================================================
+# CMake Config Export
+# =============================================================================
+
+include(CMakePackageConfigHelpers)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/luxgpu-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/luxgpu-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/luxgpu-config.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/luxgpu
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/luxgpu-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/luxgpu-config-version.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/luxgpu
+)
+
+# =============================================================================
 # Summary
 # =============================================================================
+
+# Check OpenMP status for summary
+if(LUX_GPU_CPU_BACKEND AND LUX_GPU_CPU_USE_OPENMP)
+    set(_openmp_status "${OpenMP_CXX_FOUND}")
+else()
+    set(_openmp_status "OFF")
+endif()
 
 message(STATUS "")
 message(STATUS "=== Lux GPU Core Configuration ===")
 message(STATUS "  Version: ${PROJECT_VERSION}")
 message(STATUS "  CPU Backend: ${LUX_GPU_CPU_BACKEND}")
-message(STATUS "  OpenMP: ${OpenMP_CXX_FOUND}")
+message(STATUS "  OpenMP: ${_openmp_status}")
 message(STATUS "  Tests: ${LUX_GPU_BUILD_TESTS}")
 message(STATUS "  Benchmarks: ${LUX_GPU_BUILD_BENCHMARKS}")
+message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "")
 message(STATUS "Backend plugins (built separately):")
 message(STATUS "  Metal:  luxcpp/metal  (macOS arm64)")

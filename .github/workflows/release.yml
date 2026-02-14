@@ -1,0 +1,328 @@
+# Release workflow for lux-gpu core library
+# Builds for linux-x64, macos-arm64, macos-x64, windows-x64
+# Packages: shared lib + static lib + headers + pkg-config
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.2.0)'
+        required: true
+        default: '0.2.0'
+
+env:
+  CMAKE_BUILD_TYPE: Release
+  LIBRARY_NAME: luxgpu
+
+jobs:
+  # ===========================================================================
+  # Linux x86_64
+  # ===========================================================================
+  build-linux-x64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLUX_GPU_BUILD_TESTS=OFF \
+            -DLUX_GPU_BUILD_BENCHMARKS=OFF \
+            -DLUX_GPU_CPU_BACKEND=ON \
+            -DCMAKE_INSTALL_PREFIX=dist
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd dist
+          tar -czvf ../lux-gpu-${VERSION}-linux-x64.tar.gz .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-gpu-linux-x64
+          path: lux-gpu-*.tar.gz
+
+  # ===========================================================================
+  # macOS arm64 (Apple Silicon)
+  # ===========================================================================
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake ninja
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLUX_GPU_BUILD_TESTS=OFF \
+            -DLUX_GPU_BUILD_BENCHMARKS=OFF \
+            -DLUX_GPU_CPU_BACKEND=ON \
+            -DCMAKE_INSTALL_PREFIX=dist
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd dist
+          tar -czvf ../lux-gpu-${VERSION}-macos-arm64.tar.gz .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-gpu-macos-arm64
+          path: lux-gpu-*.tar.gz
+
+  # ===========================================================================
+  # macOS x86_64 (Intel)
+  # ===========================================================================
+  build-macos-x64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake ninja
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLUX_GPU_BUILD_TESTS=OFF \
+            -DLUX_GPU_BUILD_BENCHMARKS=OFF \
+            -DLUX_GPU_CPU_BACKEND=ON \
+            -DCMAKE_INSTALL_PREFIX=dist
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd dist
+          tar -czvf ../lux-gpu-${VERSION}-macos-x64.tar.gz .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-gpu-macos-x64
+          path: lux-gpu-*.tar.gz
+
+  # ===========================================================================
+  # Windows x86_64
+  # ===========================================================================
+  build-windows-x64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=ON `
+            -DLUX_GPU_BUILD_TESTS=OFF `
+            -DLUX_GPU_BUILD_BENCHMARKS=OFF `
+            -DLUX_GPU_CPU_BACKEND=ON `
+            -DCMAKE_INSTALL_PREFIX=dist
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Install
+        run: cmake --install build --config Release
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd dist
+          7z a -tzip ../lux-gpu-${VERSION}-windows-x64.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-gpu-windows-x64
+          path: lux-gpu-*.zip
+
+  # ===========================================================================
+  # Create GitHub Release
+  # ===========================================================================
+  release:
+    needs: [build-linux-x64, build-macos-arm64, build-macos-x64, build-windows-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "tag=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts -name "*.tar.gz" -exec cp {} release/ \;
+          find artifacts -name "*.zip" -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: lux-gpu v${{ steps.version.outputs.version }}
+          body: |
+            ## lux-gpu v${{ steps.version.outputs.version }}
+
+            Lightweight GPU acceleration core library with plugin architecture.
+
+            ### Features
+            - Stable ABI for backend plugins (backend_plugin.h)
+            - Runtime backend switching (Metal/CUDA/WebGPU/CPU)
+            - Built-in CPU fallback backend with OpenMP parallelization
+            - ZK/FHE operations: NTT, Poseidon2, MSM, BLS12-381, BN254, KZG
+
+            ### Downloads
+
+            | Platform | Architecture | File |
+            |----------|--------------|------|
+            | Linux | x86_64 | `lux-gpu-${{ steps.version.outputs.version }}-linux-x64.tar.gz` |
+            | macOS | arm64 (Apple Silicon) | `lux-gpu-${{ steps.version.outputs.version }}-macos-arm64.tar.gz` |
+            | macOS | x86_64 (Intel) | `lux-gpu-${{ steps.version.outputs.version }}-macos-x64.tar.gz` |
+            | Windows | x86_64 | `lux-gpu-${{ steps.version.outputs.version }}-windows-x64.zip` |
+
+            ### Installation
+
+            ```bash
+            # Linux/macOS
+            curl -LO https://github.com/luxfi/gpu/releases/download/${{ steps.version.outputs.tag }}/lux-gpu-${{ steps.version.outputs.version }}-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/aarch64/arm64/').tar.gz
+            sudo tar -xzf lux-gpu-*.tar.gz -C /usr/local
+
+            # Verify
+            pkg-config --libs luxgpu
+            ```
+
+            ### Package Contents
+
+            ```
+            lib/
+              libluxgpu.so|dylib|dll    # Shared library
+              libluxgpu.a|lib           # Static library
+              pkgconfig/luxgpu.pc       # pkg-config file
+              cmake/luxgpu/             # CMake config
+            include/
+              lux/gpu.h                 # Main API header
+              lux/gpu/backend_plugin.h  # Backend plugin ABI
+              lux/gpu/kernel_loader.h   # Kernel loader utilities
+            ```
+
+            ### Backend Plugins
+
+            GPU backends are distributed separately:
+            - **Metal** (macOS arm64): [luxfi/metal](https://github.com/luxfi/metal/releases)
+            - **CUDA** (Linux/Windows): [luxfi/cuda](https://github.com/luxfi/cuda/releases)
+            - **WebGPU** (cross-platform): [luxfi/webgpu](https://github.com/luxfi/webgpu/releases)
+
+            ### CGO Usage (Go)
+
+            ```bash
+            export CGO_CFLAGS=$(pkg-config --cflags luxgpu)
+            export CGO_LDFLAGS=$(pkg-config --libs luxgpu)
+            go build -tags cgo ./...
+            ```
+
+            ### Rust Usage
+
+            ```toml
+            [build-dependencies]
+            pkg-config = "0.3"
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

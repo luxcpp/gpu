@@ -1416,8 +1416,15 @@ static LuxBackendError metal_op_keccak256_hash(
                                               options:MTLResourceStorageModeShared];
         id<MTLBuffer> out_buf = [ctx->device newBufferWithLength:out_size
                                              options:MTLResourceStorageModeShared];
+        // buffer(3) carries the num_inputs uniform that keccak256_batch reads
+        // before the early-out check. Without this bind the kernel sees 0 and
+        // emits all zeros.
+        uint32_t num_inputs_u32 = static_cast<uint32_t>(num_inputs);
+        id<MTLBuffer> n_buf = [ctx->device newBufferWithBytes:&num_inputs_u32
+                                            length:sizeof(uint32_t)
+                                            options:MTLResourceStorageModeShared];
 
-        if (!desc_buf || !data_buf || !out_buf) return LUX_BACKEND_ERROR_OUT_OF_MEMORY;
+        if (!desc_buf || !data_buf || !out_buf || !n_buf) return LUX_BACKEND_ERROR_OUT_OF_MEMORY;
 
         // Fill descriptor and data buffers
         auto* gpu_descs = static_cast<GPUHashInput*>([desc_buf contents]);
@@ -1433,8 +1440,8 @@ static LuxBackendError metal_op_keccak256_hash(
         }
 
         // Dispatch
-        id<MTLBuffer> bufs[3] = { desc_buf, data_buf, out_buf };
-        LuxBackendError err = dispatch_1d(ctx, pipeline, bufs, 3, num_inputs);
+        id<MTLBuffer> bufs[4] = { desc_buf, data_buf, out_buf, n_buf };
+        LuxBackendError err = dispatch_1d(ctx, pipeline, bufs, 4, num_inputs);
         if (err != LUX_BACKEND_OK) return err;
 
         // Read back results (on unified memory this is just a memcpy from same physical page)

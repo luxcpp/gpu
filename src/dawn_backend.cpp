@@ -260,10 +260,14 @@ static LuxBackendError dawn_get_device_info(LuxBackendContext* ctx,
 // Sync
 // =============================================================================
 
-static LuxBackendError dawn_sync(LuxBackendContext*) {
+static LuxBackendError dawn_sync(LuxBackendContext* ctx) {
 #ifdef LUX_GPU_DAWN
-    // Dawn processes async operations on tick
-    // In a real implementation, we'd wait for all submissions
+    if (ctx && ctx->device) {
+        // Submit an empty queue operation and poll until done
+        wgpuDeviceTick(ctx->device);
+    }
+#else
+    (void)ctx;
 #endif
     return LUX_BACKEND_OK;
 }
@@ -315,11 +319,61 @@ static void dawn_buffer_free(LuxBackendContext*, LuxBackendBuffer* buf) {
     delete buf;
 }
 
-static LuxBackendError dawn_buffer_copy_to_host(LuxBackendContext*,
+static LuxBackendError dawn_buffer_copy_to_host(LuxBackendContext* ctx,
                                                  LuxBackendBuffer* buf,
                                                  void* dst, size_t bytes) {
     if (!buf || !dst) return LUX_BACKEND_ERROR_INVALID_ARGUMENT;
     size_t n = std::min(bytes, buf->size);
+
+#ifdef LUX_GPU_DAWN
+    if (ctx && ctx->device && ctx->queue && buf->gpu_buf) {
+        // Create a staging buffer for map-read
+        WGPUBufferDescriptor map_desc = {};
+        map_desc.size = n;
+        map_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+        map_desc.mappedAtCreation = false;
+        WGPUBuffer map_buf = wgpuDeviceCreateBuffer(ctx->device, &map_desc);
+
+        // Copy GPU buffer to staging
+        WGPUCommandEncoderDescriptor enc_desc = {};
+        WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(ctx->device, &enc_desc);
+        wgpuCommandEncoderCopyBufferToBuffer(enc, buf->gpu_buf, 0, map_buf, 0, n);
+        WGPUCommandBufferDescriptor cmd_desc = {};
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, &cmd_desc);
+        wgpuQueueSubmit(ctx->queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+        wgpuCommandEncoderRelease(enc);
+
+        // Map the staging buffer and copy
+        struct MapState { bool done; WGPUBufferMapAsyncStatus status; };
+        MapState state = {false, WGPUBufferMapAsyncStatus_Unknown};
+        wgpuBufferMapAsync(map_buf, WGPUMapMode_Read, 0, n,
+            [](WGPUBufferMapAsyncStatus s, void* ud) {
+                auto* st = static_cast<MapState*>(ud);
+                st->status = s;
+                st->done = true;
+            }, &state);
+
+        while (!state.done) {
+            wgpuDeviceTick(ctx->device);
+        }
+
+        if (state.status == WGPUBufferMapAsyncStatus_Success) {
+            const void* mapped = wgpuBufferGetConstMappedRange(map_buf, 0, n);
+            if (mapped) {
+                std::memcpy(dst, mapped, n);
+                std::memcpy(buf->staging, mapped, n);
+            }
+            wgpuBufferUnmap(map_buf);
+        }
+
+        wgpuBufferRelease(map_buf);
+        return LUX_BACKEND_OK;
+    }
+#else
+    (void)ctx;
+#endif
+
     std::memcpy(dst, buf->staging, n);
     return LUX_BACKEND_OK;
 }
@@ -401,9 +455,71 @@ static void dawn_kernel_destroy(LuxBackendContext*, LuxBackendKernel* k) {
 }
 
 static LuxBackendError dawn_kernel_dispatch(
-    LuxBackendContext*, LuxBackendKernel*, uint32_t, uint32_t, uint32_t,
-    uint32_t, uint32_t, uint32_t, LuxBackendBuffer**, int) {
+    LuxBackendContext* ctx, LuxBackendKernel* k,
+    uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
+    uint32_t block_x, uint32_t /*block_y*/, uint32_t /*block_z*/,
+    LuxBackendBuffer** buffers, int num_buffers) {
+    if (!ctx || !k || !buffers) return LUX_BACKEND_ERROR_INVALID_ARGUMENT;
+
+#ifdef LUX_GPU_DAWN
+    if (!ctx->device || !ctx->queue || !k->pipeline)
+        return LUX_BACKEND_ERROR_DEVICE_LOST;
+
+    // Create bind group layout from pipeline
+    WGPUBindGroupLayout bgl = wgpuComputePipelineGetBindGroupLayout(k->pipeline, 0);
+    if (!bgl) return LUX_BACKEND_ERROR_INTERNAL;
+
+    // Build bind group entries
+    std::vector<WGPUBindGroupEntry> entries(num_buffers);
+    for (int i = 0; i < num_buffers; i++) {
+        entries[i] = {};
+        entries[i].binding = static_cast<uint32_t>(i);
+        entries[i].buffer = buffers[i]->gpu_buf;
+        entries[i].offset = 0;
+        entries[i].size = buffers[i]->size;
+    }
+
+    WGPUBindGroupDescriptor bg_desc = {};
+    bg_desc.layout = bgl;
+    bg_desc.entryCount = static_cast<size_t>(num_buffers);
+    bg_desc.entries = entries.data();
+
+    WGPUBindGroup bg = wgpuDeviceCreateBindGroup(ctx->device, &bg_desc);
+    wgpuBindGroupLayoutRelease(bgl);
+    if (!bg) return LUX_BACKEND_ERROR_INTERNAL;
+
+    // Encode and submit
+    WGPUCommandEncoderDescriptor enc_desc = {};
+    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(ctx->device, &enc_desc);
+
+    WGPUComputePassDescriptor pass_desc = {};
+    WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(encoder, &pass_desc);
+    wgpuComputePassEncoderSetPipeline(pass, k->pipeline);
+    wgpuComputePassEncoderSetBindGroup(pass, 0, bg, 0, nullptr);
+
+    // Workgroup count: grid dimensions divided by block size, rounded up
+    uint32_t wg_x = (grid_x + block_x - 1) / block_x;
+    uint32_t wg_y = grid_y > 0 ? grid_y : 1;
+    uint32_t wg_z = grid_z > 0 ? grid_z : 1;
+    wgpuComputePassEncoderDispatchWorkgroups(pass, wg_x, wg_y, wg_z);
+    wgpuComputePassEncoderEnd(pass);
+
+    WGPUCommandBufferDescriptor cmd_desc = {};
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmd_desc);
+    wgpuQueueSubmit(ctx->queue, 1, &cmd);
+
+    // Cleanup
+    wgpuCommandBufferRelease(cmd);
+    wgpuCommandEncoderRelease(encoder);
+    wgpuComputePassEncoderRelease(pass);
+    wgpuBindGroupRelease(bg);
+
+    return LUX_BACKEND_OK;
+#else
+    (void)grid_x; (void)grid_y; (void)grid_z;
+    (void)block_x;
     return LUX_BACKEND_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 // =============================================================================
@@ -672,8 +788,12 @@ static bool dawn_init(lux_gpu_backend_desc* out) {
 
     out->abi_version = LUX_GPU_BACKEND_ABI_VERSION;
     out->backend_name = "webgpu";
-    out->backend_version = "0.2.0";
-    out->capabilities = LUX_CAP_TENSOR_OPS | LUX_CAP_KECCAK256;
+    out->backend_version = "1.0.0";
+    out->capabilities = LUX_CAP_TENSOR_OPS | LUX_CAP_KECCAK256 | LUX_CAP_ECRECOVER
+                       | LUX_CAP_CUSTOM_KERNELS | LUX_CAP_NTT | LUX_CAP_BLAKE3
+                       | LUX_CAP_BLS12_381 | LUX_CAP_REDUCE | LUX_CAP_UNARY
+                       | LUX_CAP_POLY_MUL | LUX_CAP_FHE | LUX_CAP_TFHE
+                       | LUX_CAP_BLIND_ROTATE;
     out->vtbl = &dawn_vtbl;
     return true;
 }

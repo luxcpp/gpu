@@ -4,6 +4,14 @@
 
 #include <cstdint>
 
+#ifndef __CUDA_ARCH__
+#define __device__
+#define __global__
+#define __shared__
+struct dim3 { unsigned x, y, z; };
+static dim3 blockIdx, blockDim, threadIdx;
+#endif
+
 __device__ static const uint64_t RC[24] = {
     0x0000000000000001ULL, 0x0000000000008082ULL, 0x800000000000808aULL,
     0x8000000080008000ULL, 0x000000000000808bULL, 0x0000000080000001ULL,

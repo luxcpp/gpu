@@ -529,7 +529,9 @@ inline ECPoint ec_mul(uint256 k, ECPoint P) {
     return result;
 }
 
-// Scalar multiplication with affine base point (more efficient for generator)
+// Scalar multiplication with affine base point (more efficient for generator).
+// NOT constant-time: branches on scalar bits. Safe for ecrecover (all inputs
+// are public). MUST NOT be reused for signing where the nonce k is secret.
 inline ECPoint ec_mul_affine(uint256 k, uint256 Px, uint256 Py) {
     ECPoint result = ec_identity();
 

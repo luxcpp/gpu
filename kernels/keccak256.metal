@@ -109,8 +109,11 @@ kernel void keccak256_batch(
     device const HashInput* inputs  [[buffer(0)]],
     device const uchar*     data    [[buffer(1)]],
     device uchar*           outputs [[buffer(2)]],
+    constant uint&          num_inputs [[buffer(3)]],
     uint tid                        [[thread_position_in_grid]])
 {
+    if (tid >= num_inputs) return;
+
     const uint offset = inputs[tid].offset;
     const uint len    = inputs[tid].length;
     const uint rate   = 136;  // 1088 bits / 8

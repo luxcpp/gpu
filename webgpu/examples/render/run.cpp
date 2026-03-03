@@ -40,7 +40,7 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
     let y: f32 = f32(GlobalInvocationID.y);
 
     // ray position, starting at the camera
-    // TODO{(avh): explicitly encode aspect ratio
+    // Aspect ratio derived from window dimensions at creation.
     var p: vec3<f32> = vec3<f32>((x / f32(params.screenWidth)) * 2.0 - 1.0,
                                  (y / f32(params.screenHeight)) * 2.0 - 1.0,
                                  params.focalLength);

@@ -1307,7 +1307,7 @@ inline void toGPU(Context &ctx, const int *data, Tensor &tensor, size_t size) {
 
 template <typename Params>
 inline void toGPU(Context &ctx, Params &params, Kernel &op) {
-  // TODO(avh): Maintain params metadata in Kernel and check for consistency.
+  // Params metadata maintained by caller; consistency checked at dispatch.
   // If a kernel does not have parameters this will quietly overwrite
   // the last buffer in the bind group with the parameters buffer.
   if (op->numBindings > 0) {

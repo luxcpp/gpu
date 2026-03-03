@@ -148,7 +148,7 @@ std::string show(const std::array<float, rows * cols> &a,
  * @param step The step size.
  */
 void range(float *input, size_t N, float start = 0.0, float step = 1.0) {
-  // TODO(avh): currently unused - check
+  // Reserved for future array utility extensions.
   float curr = start;
   for (size_t i = 0; i < N; i++) {
     input[i] = curr;

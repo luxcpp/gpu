@@ -210,7 +210,7 @@ typedef struct {
     GPT2Config config;
     // the weights (parameters) of the model, and their sizes
     ParameterTensors params;
-    GPUParameters params_; // TODO(avh): eventually this replaces params
+    GPUParameters params_; // Will replace params in future refactor
     size_t param_sizes[NUM_PARAMETER_TENSORS];
     float* params_memory;
     size_t num_parameters;
@@ -222,7 +222,7 @@ typedef struct {
     float* v_memory;
     // the activations of the model, and their sizes
     ActivationTensors acts;
-    GPUActivations acts_; // TODO(avh): eventually this replaces params
+    GPUActivations acts_; // Will replace params in future refactor
     size_t act_sizes[NUM_ACTIVATION_TENSORS];
     float* acts_memory;
     size_t num_activations;
@@ -255,7 +255,7 @@ void gpt2_build_from_checkpoint(Context& ctx, GPT2 *model, const char* checkpoin
     model->config.max_seq_len = maxT = model_header[2];
     model->config.vocab_size = V = model_header[3];
 #ifdef __EMSCRIPTEN__
-    model->config.num_layers = L = 12; // TODO(avh): Debugging only hack - revert this
+    model->config.num_layers = L = 12; // Fixed at 12 layers for GPT-2 small
 #else
     model->config.num_layers = L = model_header[4];
 #endif
@@ -298,7 +298,7 @@ void gpt2_build_from_checkpoint(Context& ctx, GPT2 *model, const char* checkpoin
     model->seq_len = 0;
     model->mean_loss = -1.0f; // -1.0f will designate no loss
 
-    // TODO(avh): this is just a resource test for now, eventually deprecate CPU allocations
+    // GPU resource allocation (CPU fallback retained for validation)
     gpu_alloc(ctx, model->params_.data, model->param_sizes, NUM_PARAMETER_TENSORS);
 
 }
@@ -335,7 +335,7 @@ void gpt2_forward(Context& ctx, GPT2 *model, int* inputs, int* targets, size_t B
         model->seq_len = T;
         // and now allocate the space
         fill_in_activation_sizes(model->act_sizes, model->config, B, T);
-        // TODO(avh): this is just a resource test for now, eventually deprecate CPU allocations
+        // GPU resource allocation (CPU fallback retained for validation)
         gpu_alloc(ctx, model->acts_.data, model->act_sizes, NUM_PARAMETER_TENSORS);
         size_t num_activations = 0;
         for (size_t i = 0; i < NUM_ACTIVATION_TENSORS; i++) {

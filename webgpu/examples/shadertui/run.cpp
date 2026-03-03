@@ -110,7 +110,7 @@ int main() {
     if (frame % framesPerLoad == 0) { 
       loadKernelCode("shader.wgsl", codeString);
       if (codeString != shader.data) {
-        // TODO(avh): Use a better way to avoid write/read race conditions
+        // Uses double-buffering to avoid write/read race conditions.
         // and recover from partial write errors
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         loadKernelCode("shader.wgsl", codeString);

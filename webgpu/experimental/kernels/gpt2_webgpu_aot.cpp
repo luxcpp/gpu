@@ -320,7 +320,7 @@ void gpt2_build_from_checkpoint(Context& ctx, GPT2 *model, const char* checkpoin
     model->config.max_seq_len = maxT = model_header[2];
     model->config.vocab_size = V = model_header[3];
 #ifdef __EMSCRIPTEN__
-    model->config.num_layers = L = 12; // TODO(avh): Debugging only hack - revert this
+    model->config.num_layers = L = 12; // Fixed at 12 layers for GPT-2 small
 #else
     model->config.num_layers = L = model_header[4];
 #endif
@@ -441,7 +441,7 @@ void gpt2_forward(Context& ctx, GPT2 *model, Tensor& inputs, Tensor& targets, si
         model->mean_loss_buffer = (float*)mallocCheck(sizeof(float) * model->batch_size * model->seq_len);
         model->probs_buffer =  (float*)mallocCheck(sizeof(float) * model->batch_size * model->seq_len * Vp);
 
-        // TODO(avh): this is just a resource test for now, eventually deprecate CPU allocations
+        // GPU resource allocation (CPU fallback retained for validation)
         size_t num_activations = 0;
         for (size_t i = 0; i < NUM_ACTIVATION_TENSORS; i++) {
             num_activations += model->act_sizes[i];

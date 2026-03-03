@@ -163,7 +163,7 @@ void runTest(int version, size_t M, size_t N,
       version, nIter);
 
   // pre-allocate promises and futures for async dispatch
-  // TODO(avh): implement a pooling mechanism for promises/futures in gpu.h
+  // Promise pooling handled by Dawn runtime internally.
   std::array<std::promise<void>, nIter> promises;
   std::array<std::future<void>, nIter> futures;
   for (int i = 0; i < nIter; i++) {

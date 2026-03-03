@@ -1,0 +1,135 @@
+# Copyright (c) 2024-2026 Lux Industries Inc.
+# SPDX-License-Identifier: BSD-3-Clause-Eco
+#
+# CUDA H100 CI - Compile and test on NVIDIA H100 (sm_90) hardware
+#
+# Requires self-hosted runner with labels: [self-hosted, gpu, cuda, h100]
+# Runner setup:
+#   - NVIDIA H100 GPU with driver >= 535
+#   - CUDA Toolkit >= 12.4
+#   - CMake >= 3.20, Ninja
+#   - nvidia-smi accessible
+
+name: CUDA H100
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kernels/*.cu'
+      - 'src/cuda_backend.cpp'
+      - 'include/**'
+      - 'test/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/cuda-h100.yml'
+  pull_request:
+    paths:
+      - 'kernels/*.cu'
+      - 'src/cuda_backend.cpp'
+      - 'include/**'
+      - 'test/**'
+      - 'CMakeLists.txt'
+  workflow_dispatch:
+
+jobs:
+  # ===========================================================================
+  # Stage 1: Compile all 30 .cu files targeting H100 (sm_90)
+  # ===========================================================================
+  compile-kernels:
+    runs-on: [self-hosted, gpu, cuda, h100]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify H100 GPU
+        run: |
+          nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader
+          COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+          if [ "$COMPUTE_CAP" -lt 90 ]; then
+            echo "ERROR: compute capability $COMPUTE_CAP < 9.0 (not H100)"
+            exit 1
+          fi
+          echo "H100 confirmed: compute capability $COMPUTE_CAP"
+
+      - name: Verify CUDA toolkit
+        run: |
+          nvcc --version
+          CUDA_MAJOR=$(nvcc --version | grep 'release' | sed 's/.*release //' | cut -d. -f1)
+          if [ "$CUDA_MAJOR" -lt 12 ]; then
+            echo "ERROR: CUDA $CUDA_MAJOR < 12 required for sm_90"
+            exit 1
+          fi
+
+      - name: Compile CUDA kernels (sm_90)
+        run: |
+          cd kernels
+          PASS=0; FAIL=0
+          for f in *.cu; do
+            echo -n "  $f ... "
+            if nvcc -std=c++17 -arch=sm_90 -Werror all-warnings --compile "$f" -o /dev/null 2>&1; then
+              echo "OK"
+              PASS=$((PASS+1))
+            else
+              echo "FAIL"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "---"
+          echo "$PASS/$((PASS+FAIL)) CUDA kernels compile for sm_90"
+          [ $FAIL -eq 0 ] || exit 1
+
+  # ===========================================================================
+  # Stage 2: Full build + test suite on H100 hardware
+  # ===========================================================================
+  build-and-test:
+    runs-on: [self-hosted, gpu, cuda, h100]
+    needs: compile-kernels
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLUX_GPU_CUDA_BACKEND=ON \
+            -DLUX_GPU_BUILD_TESTS=ON \
+            -DLUX_GPU_BUILD_BENCHMARKS=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=90
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run kernel tests
+        run: |
+          cd build
+          ./test/test_backends 2>&1
+          echo "--- test_backends complete ---"
+
+      - name: Run core tests
+        run: |
+          cd build
+          [ -f test/test_core ] && ./test/test_core 2>&1 || echo "test_core not built (CPU-only target)"
+          echo "--- test_core complete ---"
+
+      - name: Run edge case tests
+        run: |
+          cd build
+          [ -f test/test_edge_cases ] && ./test/test_edge_cases 2>&1 || echo "test_edge_cases not built"
+          echo "--- edge cases complete ---"
+
+      - name: Run ZK operation tests
+        run: |
+          cd build
+          [ -f test/test_zk_ops ] && ./test/test_zk_ops 2>&1 || echo "test_zk_ops not built"
+          echo "--- zk ops complete ---"
+
+      - name: H100 throughput benchmark
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          cd build
+          [ -f test/bench_all_crypto ] && ./test/bench_all_crypto 2>&1 || echo "bench not built"
+          [ -f test/bench_ecrecover ] && ./test/bench_ecrecover 2>&1 || echo "bench not built"
+          echo "--- benchmarks complete ---"

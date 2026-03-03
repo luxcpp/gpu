@@ -87,6 +87,18 @@ LuxError lux_tfhe_keyswitch(LuxGPU* gpu, ...);
 LuxError lux_blind_rotate(LuxGPU* gpu, ...);
 ```
 
+## CI
+
+| Workflow | Runner | What it does |
+|----------|--------|--------------|
+| `gpu-test.yml` / `cuda-compile` | `ubuntu-latest` container `nvidia/cuda:12.4.0-devel` | Compile-only check (no GPU HW) |
+| `gpu-test.yml` / `cuda-benchmark` | `[self-hosted, gpu, cuda]` | Build + benchmark on any CUDA GPU (main only) |
+| `gpu-test.yml` / `cuda-cpu-mode` | `ubuntu-latest` | Compile .cu as C++ and run CPU-mode tests |
+| `cuda-h100.yml` / `compile-kernels` | `[self-hosted, gpu, cuda, h100]` | nvcc -arch=sm_90 compile all 30 .cu files |
+| `cuda-h100.yml` / `build-and-test` | `[self-hosted, gpu, cuda, h100]` | Full cmake build + test suite on H100 |
+
+H100 runner requirements: NVIDIA driver >= 535, CUDA Toolkit >= 12.4, CMake >= 3.20, Ninja.
+
 ## Environment Variables
 
 - `LUX_GPU_BACKEND` - Force backend: `metal`, `cuda`, `webgpu`, `cpu`

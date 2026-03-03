@@ -58,7 +58,7 @@ jobs:
           cd kernels
           PASS=0; FAIL=0
           for f in *.cu; do
-            if nvcc -std=c++17 --compile "$f" -o /dev/null 2>/dev/null; then
+            if nvcc -std=c++17 --compile "$f" -o /dev/null 2>&1; then
               PASS=$((PASS+1))
             else
               echo "FAIL: $f"
@@ -66,8 +66,7 @@ jobs:
             fi
           done
           echo "$PASS CUDA kernels compile, $FAIL fail"
-          # Don't fail on CUDA stubs — they have TODOs
-          echo "Note: stub kernels with TODO are expected to compile but not run"
+          [ $FAIL -eq 0 ] || exit 1
 
   cuda-benchmark:
     runs-on: [self-hosted, gpu, cuda]

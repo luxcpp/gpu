@@ -1589,7 +1589,7 @@ static LuxBackendError cpu_op_kzg_open(LuxBackendContext*,
     U256 remainder = fr_to_mont(c[degree - 1]);
 
     for (int i = (int)degree - 2; i >= 0; i--) {
-        quotient[i] = remainder;
+        quotient[static_cast<size_t>(i)] = remainder;
         remainder = fr_add(fr_mul(remainder, z_mont), fr_to_mont(c[i]));
     }
 
@@ -2070,6 +2070,7 @@ static LuxBackendError cpu_op_ringtail_combine_batch(
     LuxBackendContext*, const void* partial_sigs, const int32_t* lagrange_coeffs,
     void* combined_sigs, size_t threshold, size_t count) {
     if (!partial_sigs || !lagrange_coeffs || !combined_sigs) return LUX_BACKEND_ERROR_INVALID_ARGUMENT;
+    (void)threshold; // threshold used by GPU kernel, CPU stub processes all shares
     std::memset(combined_sigs, 0, count * 1024);
     return LUX_BACKEND_OK;
 }

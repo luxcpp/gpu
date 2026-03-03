@@ -82,9 +82,9 @@ extern "C" __global__ void keccak256_batch(
     // Absorb (rate = 136 bytes = 17 uint64s)
     uint32_t pos = 0;
     while (pos + 136 <= len) {
-        for (int i = 0; i < 17; i++) {
+        for (uint32_t i = 0; i < 17; i++) {
             uint64_t word = 0;
-            for (int b = 0; b < 8; b++)
+            for (uint32_t b = 0; b < 8; b++)
                 word |= (uint64_t)input[pos + i*8 + b] << (b*8);
             state[i] ^= word;
         }

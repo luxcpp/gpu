@@ -5,7 +5,8 @@
 #include <cstdint>
 #include <cstring>
 
-// Stub CUDA builtins
+// Stub CUDA builtins (define __CUDA_ARCH__ so .cu files skip their own stubs)
+#define __CUDA_ARCH__ 1
 struct dim3 { uint32_t x,y,z; };
 static dim3 blockIdx{0,0,0}, blockDim{1,0,0}, threadIdx{0,0,0};
 #define __global__
@@ -49,9 +50,9 @@ int main() {
     // Test 3: batch 100 hashes deterministic
     {
         uint8_t data[3200]; uint32_t offs[100], lens[100]; uint8_t outs[3200], outs2[3200];
-        for (int i=0;i<100;i++) { offs[i]=i*32; lens[i]=32; for(int j=0;j<32;j++) data[i*32+j]=(uint8_t)(i+j); }
-        for (int t=0;t<100;t++) { blockIdx.x=t; keccak256_batch(data,offs,lens,outs,100); }
-        for (int t=0;t<100;t++) { blockIdx.x=t; keccak256_batch(data,offs,lens,outs2,100); }
+        for (uint32_t i=0;i<100;i++) { offs[i]=i*32; lens[i]=32; for(uint32_t j=0;j<32;j++) data[i*32+j]=(uint8_t)(i+j); }
+        for (uint32_t t=0;t<100;t++) { blockIdx.x=t; keccak256_batch(data,offs,lens,outs,100); }
+        for (uint32_t t=0;t<100;t++) { blockIdx.x=t; keccak256_batch(data,offs,lens,outs2,100); }
         if (memcmp(outs, outs2, 3200)==0) { printf("  PASS: batch deterministic\n"); pass++; }
         else { printf("  FAIL: batch deterministic\n"); fail++; }
     }

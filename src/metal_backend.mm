@@ -131,9 +131,11 @@ static NSString* find_metal_source(const char* name) {
 static id<MTLLibrary> compile_metal_source(id<MTLDevice> device, NSString* source) {
     NSError* error = nil;
     MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
+#if defined(__MAC_14_0) || defined(__IPHONE_17_0)
     if (@available(macOS 14.0, iOS 17.0, *)) {
         opts.mathMode = MTLMathModeFast;
     }
+#endif
     opts.languageVersion = MTLLanguageVersion3_0;
 
     id<MTLLibrary> lib = [device newLibraryWithSource:source options:opts error:&error];

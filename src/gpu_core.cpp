@@ -1336,21 +1336,15 @@ void lux_event_destroy(LuxEvent* event) {
     delete event;
 }
 
-LuxError lux_event_record(LuxEvent* event, LuxStream* stream) {
+LuxError lux_event_record(LuxEvent* event, LuxStream* /*stream*/) {
     if (!event) return LUX_ERROR_INVALID_ARGUMENT;
-    // Stream can be null (use default stream)
-    // For CPU: record current time
-    // For GPU: would insert marker into command queue
     event->timestamp = std::chrono::steady_clock::now();
     event->recorded = true;
     return LUX_OK;
 }
 
-LuxError lux_event_wait(LuxEvent* event, LuxStream* stream) {
+LuxError lux_event_wait(LuxEvent* event, LuxStream* /*stream*/) {
     if (!event || !event->recorded) return LUX_ERROR_INVALID_ARGUMENT;
-    // Stream can be null (use default stream)
-    // For CPU: event is already complete (synchronous execution)
-    // For GPU: would wait until event is signaled
     return LUX_OK;
 }
 
@@ -1572,6 +1566,8 @@ LuxError lux_bls_verify(LuxGPU* gpu,
     // Validate inputs
     if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
     if (!sig || !msg || !pubkey || !result) return LUX_ERROR_INVALID_ARGUMENT;
+    if (sig_len < BLS_SIG_SIZE || pubkey_len < BLS_G1_UNCOMPRESSED_SIZE || msg_len == 0)
+        return LUX_ERROR_INVALID_ARGUMENT;
 
     // Check backend supports required operations
     if (!gpu->vtbl->op_bls12_381_pairing) {

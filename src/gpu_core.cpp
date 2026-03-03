@@ -1566,7 +1566,7 @@ LuxError lux_bls_verify(LuxGPU* gpu,
     // Validate inputs
     if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
     if (!sig || !msg || !pubkey || !result) return LUX_ERROR_INVALID_ARGUMENT;
-    if (sig_len < BLS_SIG_SIZE || pubkey_len < BLS_G1_UNCOMPRESSED_SIZE || msg_len == 0)
+    if (sig_len < 48 || pubkey_len < BLS_G1_UNCOMPRESSED_SIZE || msg_len == 0)
         return LUX_ERROR_INVALID_ARGUMENT;
 
     // Check backend supports required operations

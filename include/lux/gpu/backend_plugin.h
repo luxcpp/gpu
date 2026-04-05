@@ -282,6 +282,15 @@ typedef struct lux_gpu_backend_vtbl {
         size_t num_hashes             // Number of parallel hashes
     );
 
+    // Keccak-256 hash (Ethereum variant)
+    LuxBackendError (*op_keccak256_hash)(
+        LuxBackendContext* ctx,
+        const uint8_t* inputs,        // Input data (concatenated)
+        uint8_t* outputs,             // Output 32-byte hashes [num_inputs * 32]
+        const size_t* input_lens,     // Length of each input
+        size_t num_inputs             // Number of parallel hashes
+    );
+
     // ==========================================================================
     // Crypto: BLS12-381 Curve Operations
     // ==========================================================================
@@ -413,6 +422,7 @@ typedef struct {
 #define LUX_CAP_BLAKE3          (1 << 16)  // BLAKE3 hash
 #define LUX_CAP_BLIND_ROTATE    (1 << 17)  // Blind rotation
 #define LUX_CAP_POLY_MUL        (1 << 18)  // Polynomial multiplication
+#define LUX_CAP_KECCAK256       (1 << 19)  // Keccak-256 hash (Ethereum)
 
 // =============================================================================
 // Plugin Entry Point

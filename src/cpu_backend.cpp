@@ -1357,6 +1357,124 @@ static LuxBackendError cpu_op_blake3_hash(LuxBackendContext*,
 }
 
 // =============================================================================
+// Keccak-256 (Ethereum variant, NOT NIST SHA-3)
+// =============================================================================
+
+static constexpr uint64_t KECCAK_RC[24] = {
+    0x0000000000000001ULL, 0x0000000000008082ULL,
+    0x800000000000808AULL, 0x8000000080008000ULL,
+    0x000000000000808BULL, 0x0000000080000001ULL,
+    0x8000000080008081ULL, 0x8000000000008009ULL,
+    0x000000000000008AULL, 0x0000000000000088ULL,
+    0x0000000080008009ULL, 0x000000008000000AULL,
+    0x000000008000808BULL, 0x800000000000008BULL,
+    0x8000000000008089ULL, 0x8000000000008003ULL,
+    0x8000000000008002ULL, 0x8000000000000080ULL,
+    0x000000000000800AULL, 0x800000008000000AULL,
+    0x8000000080008081ULL, 0x8000000000008080ULL,
+    0x0000000080000001ULL, 0x8000000080008008ULL,
+};
+
+static inline uint64_t keccak_rotl(uint64_t x, int n) {
+    return (x << n) | (x >> (64 - n));
+}
+
+static void keccak_f1600(uint64_t st[25]) {
+    static constexpr int PI_LANE[24] = {
+        10,  7, 11, 17, 18,  3,  5, 16,  8, 21, 24,  4,
+        15, 23, 19, 13, 12,  2, 20, 14, 22,  9,  6,  1
+    };
+    static constexpr int RHO[24] = {
+         1,  3,  6, 10, 15, 21, 28, 36, 45, 55,  2, 14,
+        27, 41, 56,  8, 25, 43, 62, 18, 39, 61, 20, 44
+    };
+
+    for (int round = 0; round < 24; ++round) {
+        uint64_t C[5];
+        for (int x = 0; x < 5; ++x)
+            C[x] = st[x] ^ st[x + 5] ^ st[x + 10] ^ st[x + 15] ^ st[x + 20];
+        for (int x = 0; x < 5; ++x) {
+            uint64_t d = C[(x + 4) % 5] ^ keccak_rotl(C[(x + 1) % 5], 1);
+            for (int y = 0; y < 5; ++y)
+                st[x + 5 * y] ^= d;
+        }
+        uint64_t t = st[1];
+        for (int i = 0; i < 24; ++i) {
+            uint64_t tmp = st[PI_LANE[i]];
+            st[PI_LANE[i]] = keccak_rotl(t, RHO[i]);
+            t = tmp;
+        }
+        for (int y = 0; y < 5; ++y) {
+            uint64_t row[5];
+            for (int x = 0; x < 5; ++x)
+                row[x] = st[x + 5 * y];
+            for (int x = 0; x < 5; ++x)
+                st[x + 5 * y] = row[x] ^ ((~row[(x + 1) % 5]) & row[(x + 2) % 5]);
+        }
+        st[0] ^= KECCAK_RC[round];
+    }
+}
+
+static void keccak256_single(const uint8_t* data, size_t length, uint8_t out[32]) {
+    constexpr size_t rate = 136;
+    uint64_t state[25] = {};
+
+    size_t absorbed = 0;
+    while (absorbed + rate <= length) {
+        for (size_t w = 0; w < rate / 8; ++w) {
+            uint64_t lane = 0;
+            for (size_t b = 0; b < 8; ++b)
+                lane |= uint64_t(data[absorbed + w * 8 + b]) << (b * 8);
+            state[w] ^= lane;
+        }
+        keccak_f1600(state);
+        absorbed += rate;
+    }
+
+    uint8_t padded[136] = {};
+    size_t remaining = length - absorbed;
+    std::memcpy(padded, data + absorbed, remaining);
+    padded[remaining] = 0x01;
+    padded[rate - 1] |= 0x80;
+
+    for (size_t w = 0; w < rate / 8; ++w) {
+        uint64_t lane = 0;
+        for (size_t b = 0; b < 8; ++b)
+            lane |= uint64_t(padded[w * 8 + b]) << (b * 8);
+        state[w] ^= lane;
+    }
+    keccak_f1600(state);
+
+    for (size_t w = 0; w < 4; ++w) {
+        uint64_t lane = state[w];
+        for (size_t b = 0; b < 8; ++b)
+            out[w * 8 + b] = static_cast<uint8_t>(lane >> (b * 8));
+    }
+}
+
+static LuxBackendError cpu_op_keccak256_hash(LuxBackendContext*,
+                                              const uint8_t* inputs, uint8_t* outputs,
+                                              const size_t* input_lens, size_t num_inputs) {
+    if (!inputs || !outputs || !input_lens)
+        return LUX_BACKEND_ERROR_INVALID_ARGUMENT;
+
+    std::vector<size_t> offsets(num_inputs + 1);
+    offsets[0] = 0;
+    for (size_t i = 0; i < num_inputs; i++) {
+        offsets[i + 1] = offsets[i] + input_lens[i];
+    }
+
+#ifdef _OPENMP
+    #pragma omp parallel for if(num_inputs > 64)
+#endif
+    for (size_t h = 0; h < num_inputs; h++) {
+        keccak256_single(inputs + offsets[h], input_lens[h], outputs + h * 32);
+    }
+
+    return LUX_BACKEND_OK;
+}
+
+// =============================================================================
 // BLS12-381 Curve Operations (stub - uses similar structure to BN254)
 // =============================================================================
 
@@ -1583,6 +1701,7 @@ static const lux_gpu_backend_vtbl cpu_vtbl = {
     // Crypto hash operations
     .op_poseidon2_hash = cpu_op_poseidon2_hash,
     .op_blake3_hash = cpu_op_blake3_hash,
+    .op_keccak256_hash = cpu_op_keccak256_hash,
 
     // BLS12-381 operations
     .op_bls12_381_add = cpu_op_bls12_381_add,
@@ -1616,7 +1735,7 @@ extern "C" bool cpu_backend_init(lux_gpu_backend_desc* out) {
                       | LUX_CAP_REDUCE | LUX_CAP_SOFTMAX | LUX_CAP_UNARY
                       | LUX_CAP_NORMALIZATION | LUX_CAP_BN254 | LUX_CAP_KZG
                       | LUX_CAP_POSEIDON2 | LUX_CAP_BLAKE3 | LUX_CAP_BLIND_ROTATE
-                      | LUX_CAP_POLY_MUL;
+                      | LUX_CAP_POLY_MUL | LUX_CAP_KECCAK256;
     out->vtbl = &cpu_vtbl;
     return true;
 }

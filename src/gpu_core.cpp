@@ -1448,6 +1448,13 @@ LuxError lux_blake3_hash(LuxGPU* gpu, const uint8_t* inputs, uint8_t* outputs, c
     return static_cast<LuxError>(gpu->vtbl->op_blake3_hash(gpu->ctx, inputs, outputs, input_lens, num_hashes));
 }
 
+LuxError lux_gpu_keccak256_batch(LuxGPU* gpu, const uint8_t* inputs, uint8_t* outputs, const size_t* input_lens, size_t num_inputs) {
+    if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!inputs || !outputs || !input_lens) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!gpu->vtbl->op_keccak256_hash) return LUX_ERROR_NOT_SUPPORTED;
+    return static_cast<LuxError>(gpu->vtbl->op_keccak256_hash(gpu->ctx, inputs, outputs, input_lens, num_inputs));
+}
+
 // =============================================================================
 // Crypto: MSM
 // =============================================================================

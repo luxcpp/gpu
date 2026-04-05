@@ -250,6 +250,16 @@ LuxError lux_blake3_hash(LuxGPU* gpu,
                          const size_t* input_lens,      // Length of each input
                          size_t num_hashes);
 
+// Keccak-256 hash (Ethereum variant, NOT NIST SHA-3)
+//   - Padding: 0x01 || 0x00...0x00 || 0x80 (Keccak, not SHA-3's 0x06)
+//   - Output: 32 bytes per input
+//   - Primary use: EVM state trie hashing, address derivation
+LuxError lux_gpu_keccak256_batch(LuxGPU* gpu,
+                                 const uint8_t* inputs,         // Concatenated inputs
+                                 uint8_t* outputs,              // [num_inputs * 32]
+                                 const size_t* input_lens,      // Length of each input
+                                 size_t num_inputs);
+
 // =============================================================================
 // Crypto Operations: MSM (Multi-Scalar Multiplication)
 // =============================================================================

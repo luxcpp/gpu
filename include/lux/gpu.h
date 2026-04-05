@@ -261,6 +261,44 @@ LuxError lux_gpu_keccak256_batch(LuxGPU* gpu,
                                  size_t num_inputs);
 
 // =============================================================================
+// Crypto Operations: secp256k1 ECDSA Recovery (Ethereum ecrecover)
+// =============================================================================
+
+// Packed signature for ecrecover batch operations.
+// Each entry: r[32] || s[32] || v[1] || pad[3] || msg_hash[32] || pad[28] = 128 bytes
+typedef struct {
+    uint8_t r[32];        // ECDSA r value (big-endian)
+    uint8_t s[32];        // ECDSA s value (big-endian)
+    uint8_t v;            // Recovery id (0 or 1)
+    uint8_t _pad[3];      // Alignment padding
+    uint8_t msg_hash[32]; // Message hash (big-endian)
+    uint8_t _pad2[28];    // Pad to 128 bytes
+} LuxEcrecoverInput;
+
+// Output of ecrecover: recovered Ethereum address.
+typedef struct {
+    uint8_t address[20]; // Recovered address (or zeros on failure)
+    uint8_t valid;       // 1 if recovery succeeded, 0 otherwise
+    uint8_t _pad[11];    // Pad to 32 bytes
+} LuxEcrecoverOutput;
+
+// Batch secp256k1 ECDSA public key recovery → Ethereum address.
+//
+// For each signature (r, s, v, msg_hash):
+//   1. Recover public key Q from the ECDSA signature
+//   2. Compute address = keccak256(Q.x || Q.y)[12:]
+//
+// This is the EVM ecrecover precompile, batched for GPU parallelism.
+// Each GPU thread processes one signature independently.
+//
+// Returns LUX_OK on success (individual failures are indicated by valid=0
+// in the output; the batch call itself only fails on argument errors).
+LuxError lux_gpu_ecrecover_batch(LuxGPU* gpu,
+                                 const LuxEcrecoverInput* signatures,
+                                 LuxEcrecoverOutput* addresses,
+                                 size_t num_signatures);
+
+// =============================================================================
 // Crypto Operations: MSM (Multi-Scalar Multiplication)
 // =============================================================================
 

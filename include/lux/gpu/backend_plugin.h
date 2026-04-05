@@ -385,8 +385,23 @@ typedef struct lux_gpu_backend_vtbl {
         int curve_type                // LuxCurveType
     );
 
+    // ==========================================================================
+    // Crypto: secp256k1 ECDSA Recovery (Ethereum ecrecover)
+    // ==========================================================================
+
+    // Batch ecrecover: recover Ethereum addresses from ECDSA signatures.
+    // signatures: array of packed (r, s, v, msg_hash) tuples (128 bytes each)
+    // addresses: output array of 20-byte Ethereum addresses (32 bytes each, padded)
+    // num_signatures: number of signatures to process
+    LuxBackendError (*op_ecrecover_batch)(
+        LuxBackendContext* ctx,
+        const void* signatures,       // LuxEcrecoverInput[num_signatures]
+        void* addresses,              // LuxEcrecoverOutput[num_signatures]
+        size_t num_signatures
+    );
+
     // Reserved for future expansion (don't break ABI)
-    void* _reserved[4];
+    void* _reserved[3];
 
 } lux_gpu_backend_vtbl;
 
@@ -423,6 +438,7 @@ typedef struct {
 #define LUX_CAP_BLIND_ROTATE    (1 << 17)  // Blind rotation
 #define LUX_CAP_POLY_MUL        (1 << 18)  // Polynomial multiplication
 #define LUX_CAP_KECCAK256       (1 << 19)  // Keccak-256 hash (Ethereum)
+#define LUX_CAP_ECRECOVER       (1 << 20)  // secp256k1 ECDSA recovery (Ethereum ecrecover)
 
 // =============================================================================
 // Plugin Entry Point

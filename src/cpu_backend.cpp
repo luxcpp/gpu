@@ -1614,6 +1614,416 @@ static LuxBackendError cpu_op_kzg_verify(LuxBackendContext*,
 }
 
 // =============================================================================
+// secp256k1 ECDSA Recovery (Ethereum ecrecover) - CPU
+// =============================================================================
+
+// 256-bit unsigned integer for secp256k1 field/scalar arithmetic
+struct Secp256k1U256 {
+    uint64_t limbs[4]; // Little-endian: limbs[0] = least significant
+};
+
+static inline int secp_cmp(const Secp256k1U256& a, const Secp256k1U256& b) {
+    for (int i = 3; i >= 0; i--) {
+        if (a.limbs[i] < b.limbs[i]) return -1;
+        if (a.limbs[i] > b.limbs[i]) return 1;
+    }
+    return 0;
+}
+
+static inline bool secp_is_zero(const Secp256k1U256& a) {
+    return (a.limbs[0] | a.limbs[1] | a.limbs[2] | a.limbs[3]) == 0;
+}
+
+static inline Secp256k1U256 secp_add(Secp256k1U256 a, Secp256k1U256 b, uint64_t& carry) {
+    Secp256k1U256 r;
+    unsigned __int128 c = 0;
+    for (int i = 0; i < 4; i++) {
+        c += (unsigned __int128)a.limbs[i] + b.limbs[i];
+        r.limbs[i] = (uint64_t)c;
+        c >>= 64;
+    }
+    carry = (uint64_t)c;
+    return r;
+}
+
+static inline Secp256k1U256 secp_sub(Secp256k1U256 a, Secp256k1U256 b, uint64_t& borrow) {
+    Secp256k1U256 r;
+    unsigned __int128 bw = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 diff = (unsigned __int128)a.limbs[i] - b.limbs[i] - bw;
+        r.limbs[i] = (uint64_t)diff;
+        // If underflow, high bits will be set (unsigned wrap)
+        bw = (diff >> 64) & 1;
+    }
+    borrow = (uint64_t)bw;
+    return r;
+}
+
+// secp256k1 field prime
+static const Secp256k1U256 SECP_P = {{
+    0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
+    0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL
+}};
+
+// secp256k1 curve order
+static const Secp256k1U256 SECP_N = {{
+    0xBFD25E8CD0364141ULL, 0xBAAEDCE6AF48A03BULL,
+    0xFFFFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFFFFFULL
+}};
+
+// Montgomery reduction for secp256k1 p: -p^(-1) mod 2^64
+static const uint64_t SECP_P_INV = 0xD838091DD2253531ULL;
+// R^2 mod p
+static const Secp256k1U256 SECP_R2_P = {{
+    0x000007A2000E90A1ULL, 0x0000000000000001ULL,
+    0x0000000000000000ULL, 0x0000000000000000ULL
+}};
+// Montgomery -n^(-1) mod 2^64
+static const uint64_t SECP_N_INV = 0x4B0DFF665588B13FULL;
+// R^2 mod n
+static const Secp256k1U256 SECP_R2_N = {{
+    0x896CF21467D7D140ULL, 0x741496C20E7CF878ULL,
+    0xE697F5E45BCD07C6ULL, 0x9D671CD581C69BC5ULL
+}};
+
+static inline Secp256k1U256 secp_mont_reduce(uint64_t t[8], const Secp256k1U256& m, uint64_t inv) {
+    uint64_t a[9];
+    for (int i = 0; i < 8; i++) a[i] = t[i];
+    a[8] = 0;
+
+    for (int i = 0; i < 4; i++) {
+        uint64_t u = a[i] * inv;
+        unsigned __int128 carry = 0;
+        for (int j = 0; j < 4; j++) {
+            carry += (unsigned __int128)u * m.limbs[j] + a[i + j];
+            a[i + j] = (uint64_t)carry;
+            carry >>= 64;
+        }
+        for (int j = 4; i + j < 9; j++) {
+            carry += a[i + j];
+            a[i + j] = (uint64_t)carry;
+            carry >>= 64;
+        }
+    }
+
+    Secp256k1U256 r;
+    r.limbs[0] = a[4]; r.limbs[1] = a[5]; r.limbs[2] = a[6]; r.limbs[3] = a[7];
+
+    if (secp_cmp(r, m) >= 0) {
+        uint64_t bw;
+        r = secp_sub(r, m, bw);
+    }
+    return r;
+}
+
+static inline Secp256k1U256 secp_mont_mul(Secp256k1U256 a, Secp256k1U256 b,
+                                           const Secp256k1U256& m, uint64_t inv) {
+    uint64_t t[8] = {};
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 carry = 0;
+        for (int j = 0; j < 4; j++) {
+            carry += (unsigned __int128)a.limbs[i] * b.limbs[j] + t[i + j];
+            t[i + j] = (uint64_t)carry;
+            carry >>= 64;
+        }
+        t[i + 4] += (uint64_t)carry;
+    }
+    return secp_mont_reduce(t, m, inv);
+}
+
+static inline Secp256k1U256 secp_to_mont(Secp256k1U256 a, const Secp256k1U256& r2,
+                                           const Secp256k1U256& m, uint64_t inv) {
+    return secp_mont_mul(a, r2, m, inv);
+}
+
+static inline Secp256k1U256 secp_from_mont(Secp256k1U256 a, const Secp256k1U256& m, uint64_t inv) {
+    uint64_t t[8] = {a.limbs[0], a.limbs[1], a.limbs[2], a.limbs[3], 0, 0, 0, 0};
+    return secp_mont_reduce(t, m, inv);
+}
+
+static inline Secp256k1U256 fp_add_secp(Secp256k1U256 a, Secp256k1U256 b) {
+    uint64_t carry;
+    Secp256k1U256 r = secp_add(a, b, carry);
+    if (carry || secp_cmp(r, SECP_P) >= 0) {
+        uint64_t bw;
+        r = secp_sub(r, SECP_P, bw);
+    }
+    return r;
+}
+
+static inline Secp256k1U256 fp_sub_secp(Secp256k1U256 a, Secp256k1U256 b) {
+    uint64_t bw;
+    Secp256k1U256 r = secp_sub(a, b, bw);
+    if (bw) {
+        uint64_t c;
+        r = secp_add(r, SECP_P, c);
+    }
+    return r;
+}
+
+static inline Secp256k1U256 fp_mul_secp(Secp256k1U256 a, Secp256k1U256 b) {
+    return secp_mont_mul(a, b, SECP_P, SECP_P_INV);
+}
+
+static inline Secp256k1U256 fp_sqr_secp(Secp256k1U256 a) {
+    return fp_mul_secp(a, a);
+}
+
+static inline Secp256k1U256 fn_mul_secp(Secp256k1U256 a, Secp256k1U256 b) {
+    return secp_mont_mul(a, b, SECP_N, SECP_N_INV);
+}
+
+// Modular exponentiation: base^exp mod m (in Montgomery form)
+static Secp256k1U256 secp_mod_exp(Secp256k1U256 base, const uint64_t exp[4],
+                                   const Secp256k1U256& m, uint64_t inv,
+                                   const Secp256k1U256& r2) {
+    Secp256k1U256 one = {{1, 0, 0, 0}};
+    Secp256k1U256 result = secp_to_mont(one, r2, m, inv);
+    Secp256k1U256 b = base;
+
+    for (int i = 0; i < 4; i++) {
+        for (int bit = 0; bit < 64; bit++) {
+            if ((exp[i] >> bit) & 1) {
+                result = secp_mont_mul(result, b, m, inv);
+            }
+            b = secp_mont_mul(b, b, m, inv);
+        }
+    }
+    return result;
+}
+
+static Secp256k1U256 fp_inv_secp(Secp256k1U256 a) {
+    uint64_t exp[4] = {
+        0xFFFFFFFEFFFFFC2DULL, 0xFFFFFFFFFFFFFFFFULL,
+        0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL
+    };
+    return secp_mod_exp(a, exp, SECP_P, SECP_P_INV, SECP_R2_P);
+}
+
+static Secp256k1U256 fn_inv_secp(Secp256k1U256 a) {
+    uint64_t exp[4] = {
+        0xBFD25E8CD036413FULL, 0xBAAEDCE6AF48A03BULL,
+        0xFFFFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFFFFFULL
+    };
+    return secp_mod_exp(a, exp, SECP_N, SECP_N_INV, SECP_R2_N);
+}
+
+// Jacobian point on secp256k1 (all coords in Montgomery form over F_p)
+struct SecpJacobian {
+    Secp256k1U256 x, y, z;
+};
+
+static SecpJacobian secp_identity() {
+    Secp256k1U256 one_m = secp_to_mont({{1,0,0,0}}, SECP_R2_P, SECP_P, SECP_P_INV);
+    return {one_m, one_m, {{0,0,0,0}}};
+}
+
+static bool secp_is_inf(const SecpJacobian& p) { return secp_is_zero(p.z); }
+
+static SecpJacobian secp_double(SecpJacobian p) {
+    if (secp_is_inf(p)) return p;
+    Secp256k1U256 A = fp_sqr_secp(p.y);
+    Secp256k1U256 B = fp_mul_secp(p.x, A);
+    Secp256k1U256 S = fp_add_secp(B, B); S = fp_add_secp(S, S);
+    Secp256k1U256 X2 = fp_sqr_secp(p.x);
+    Secp256k1U256 M = fp_add_secp(X2, fp_add_secp(X2, X2));
+    Secp256k1U256 X3 = fp_sub_secp(fp_sqr_secp(M), fp_add_secp(S, S));
+    Secp256k1U256 C = fp_sqr_secp(A);
+    Secp256k1U256 C8 = fp_add_secp(C, C); C8 = fp_add_secp(C8, C8); C8 = fp_add_secp(C8, C8);
+    Secp256k1U256 Y3 = fp_sub_secp(fp_mul_secp(M, fp_sub_secp(S, X3)), C8);
+    Secp256k1U256 Z3 = fp_mul_secp(p.y, p.z); Z3 = fp_add_secp(Z3, Z3);
+    return {X3, Y3, Z3};
+}
+
+static SecpJacobian secp_add_mixed(SecpJacobian P, Secp256k1U256 Qx, Secp256k1U256 Qy) {
+    if (secp_is_inf(P)) {
+        return {Qx, Qy, secp_to_mont({{1,0,0,0}}, SECP_R2_P, SECP_P, SECP_P_INV)};
+    }
+    Secp256k1U256 Z2 = fp_sqr_secp(P.z);
+    Secp256k1U256 U2 = fp_mul_secp(Qx, Z2);
+    Secp256k1U256 S2 = fp_mul_secp(Qy, fp_mul_secp(Z2, P.z));
+    Secp256k1U256 H = fp_sub_secp(U2, P.x);
+    Secp256k1U256 R = fp_sub_secp(S2, P.y);
+    if (secp_is_zero(H)) {
+        if (secp_is_zero(R)) return secp_double(P);
+        return secp_identity();
+    }
+    Secp256k1U256 H2 = fp_sqr_secp(H);
+    Secp256k1U256 H3 = fp_mul_secp(H, H2);
+    Secp256k1U256 U1H2 = fp_mul_secp(P.x, H2);
+    Secp256k1U256 X3 = fp_sub_secp(fp_sub_secp(fp_sqr_secp(R), H3), fp_add_secp(U1H2, U1H2));
+    Secp256k1U256 Y3 = fp_sub_secp(fp_mul_secp(R, fp_sub_secp(U1H2, X3)), fp_mul_secp(P.y, H3));
+    Secp256k1U256 Z3 = fp_mul_secp(H, P.z);
+    return {X3, Y3, Z3};
+}
+
+static SecpJacobian secp_mul_affine(Secp256k1U256 k, Secp256k1U256 Px, Secp256k1U256 Py) {
+    SecpJacobian result = secp_identity();
+    for (int i = 3; i >= 0; i--) {
+        for (int bit = 63; bit >= 0; bit--) {
+            result = secp_double(result);
+            if ((k.limbs[i] >> bit) & 1) {
+                result = secp_add_mixed(result, Px, Py);
+            }
+        }
+    }
+    return result;
+}
+
+static void secp_to_affine(SecpJacobian p, Secp256k1U256& ax, Secp256k1U256& ay) {
+    if (secp_is_inf(p)) { ax = {{0,0,0,0}}; ay = {{0,0,0,0}}; return; }
+    Secp256k1U256 zi = fp_inv_secp(p.z);
+    Secp256k1U256 zi2 = fp_sqr_secp(zi);
+    Secp256k1U256 zi3 = fp_mul_secp(zi2, zi);
+    ax = fp_mul_secp(p.x, zi2);
+    ay = fp_mul_secp(p.y, zi3);
+}
+
+static Secp256k1U256 secp_load_be32(const uint8_t* bytes) {
+    Secp256k1U256 r;
+    for (int limb = 0; limb < 4; limb++) {
+        uint64_t v = 0;
+        int base = (3 - limb) * 8;
+        for (int b = 0; b < 8; b++) v = (v << 8) | bytes[base + b];
+        r.limbs[limb] = v;
+    }
+    return r;
+}
+
+static void secp_store_be32(Secp256k1U256 val, uint8_t* bytes) {
+    for (int limb = 0; limb < 4; limb++) {
+        int base = (3 - limb) * 8;
+        uint64_t v = val.limbs[limb];
+        for (int b = 7; b >= 0; b--) { bytes[base + b] = (uint8_t)(v & 0xFF); v >>= 8; }
+    }
+}
+
+// Single ecrecover: recover Ethereum address from (r, s, v, msg_hash)
+static bool secp_ecrecover_single(const uint8_t* r_bytes, const uint8_t* s_bytes,
+                                   uint8_t v, const uint8_t* hash_bytes,
+                                   uint8_t addr_out[20]) {
+    Secp256k1U256 r = secp_load_be32(r_bytes);
+    Secp256k1U256 s = secp_load_be32(s_bytes);
+    Secp256k1U256 e = secp_load_be32(hash_bytes);
+
+    if (secp_is_zero(r) || secp_cmp(r, SECP_N) >= 0) return false;
+    if (secp_is_zero(s) || secp_cmp(s, SECP_N) >= 0) return false;
+    if (v > 1) return false;
+
+    // Decompress r to R = (r, y)
+    Secp256k1U256 r_m = secp_to_mont(r, SECP_R2_P, SECP_P, SECP_P_INV);
+    Secp256k1U256 r3 = fp_mul_secp(fp_sqr_secp(r_m), r_m);
+    Secp256k1U256 seven_m = secp_to_mont({{7,0,0,0}}, SECP_R2_P, SECP_P, SECP_P_INV);
+    Secp256k1U256 y2 = fp_add_secp(r3, seven_m);
+
+    // sqrt(y2): p ≡ 3 mod 4, so sqrt = y2^((p+1)/4)
+    uint64_t sqrt_exp[4] = {
+        0xFFFFFFFFBFFFFF0CULL, 0xFFFFFFFFFFFFFFFFULL,
+        0xFFFFFFFFFFFFFFFFULL, 0x3FFFFFFFFFFFFFFFULL
+    };
+    Secp256k1U256 y_m = secp_mod_exp(y2, sqrt_exp, SECP_P, SECP_P_INV, SECP_R2_P);
+    if (secp_cmp(fp_sqr_secp(y_m), y2) != 0) return false;
+
+    Secp256k1U256 y_norm = secp_from_mont(y_m, SECP_P, SECP_P_INV);
+    bool y_odd = (y_norm.limbs[0] & 1) != 0;
+    if ((v == 0 && y_odd) || (v == 1 && !y_odd)) {
+        y_m = fp_sub_secp({{0,0,0,0}}, y_m);
+    }
+
+    // r_inv = r^(-1) mod n
+    Secp256k1U256 r_n_m = secp_to_mont(r, SECP_R2_N, SECP_N, SECP_N_INV);
+    Secp256k1U256 r_inv_m = fn_inv_secp(r_n_m);
+
+    // u1 = -(e * r_inv) mod n, u2 = s * r_inv mod n
+    Secp256k1U256 e_n_m = secp_to_mont(e, SECP_R2_N, SECP_N, SECP_N_INV);
+    Secp256k1U256 s_n_m = secp_to_mont(s, SECP_R2_N, SECP_N, SECP_N_INV);
+    Secp256k1U256 u1 = secp_from_mont(fn_mul_secp(e_n_m, r_inv_m), SECP_N, SECP_N_INV);
+    if (!secp_is_zero(u1)) { uint64_t bw; u1 = secp_sub(SECP_N, u1, bw); }
+    Secp256k1U256 u2 = secp_from_mont(fn_mul_secp(s_n_m, r_inv_m), SECP_N, SECP_N_INV);
+
+    // Generator G in Montgomery form
+    static const Secp256k1U256 GX = {{
+        0x59F2815B16F81798ULL, 0x029BFCDB2DCE28D9ULL,
+        0x55A06295CE870B07ULL, 0x79BE667EF9DCBBACULL
+    }};
+    static const Secp256k1U256 GY = {{
+        0x9C47D08FFB10D4B8ULL, 0xFD17B448A6855419ULL,
+        0x5DA4FBFC0E1108A8ULL, 0x483ADA7726A3C465ULL
+    }};
+    Secp256k1U256 Gx_m = secp_to_mont(GX, SECP_R2_P, SECP_P, SECP_P_INV);
+    Secp256k1U256 Gy_m = secp_to_mont(GY, SECP_R2_P, SECP_P, SECP_P_INV);
+
+    SecpJacobian Q1 = secp_mul_affine(u1, Gx_m, Gy_m);
+    SecpJacobian Q2 = secp_mul_affine(u2, r_m, y_m);
+
+    SecpJacobian Q;
+    if (secp_is_inf(Q1)) {
+        Q = Q2;
+    } else if (secp_is_inf(Q2)) {
+        Q = Q1;
+    } else {
+        Secp256k1U256 q2x, q2y;
+        secp_to_affine(Q2, q2x, q2y);
+        Q = secp_add_mixed(Q1, q2x, q2y);
+    }
+    if (secp_is_inf(Q)) return false;
+
+    Secp256k1U256 qx, qy;
+    secp_to_affine(Q, qx, qy);
+    Secp256k1U256 qx_n = secp_from_mont(qx, SECP_P, SECP_P_INV);
+    Secp256k1U256 qy_n = secp_from_mont(qy, SECP_P, SECP_P_INV);
+
+    uint8_t pubkey[64];
+    secp_store_be32(qx_n, pubkey);
+    secp_store_be32(qy_n, pubkey + 32);
+
+    // keccak256(pubkey) → take last 20 bytes
+    uint8_t hash[32];
+    keccak256_single(pubkey, 64, hash);
+    std::memcpy(addr_out, hash + 12, 20);
+    return true;
+}
+
+// Input/output structs matching gpu.h
+struct CpuEcrecoverInput {
+    uint8_t r[32];
+    uint8_t s[32];
+    uint8_t v;
+    uint8_t _pad[3];
+    uint8_t msg_hash[32];
+    uint8_t _pad2[28];
+};
+
+struct CpuEcrecoverOutput {
+    uint8_t address[20];
+    uint8_t valid;
+    uint8_t _pad[11];
+};
+
+static LuxBackendError cpu_op_ecrecover_batch(LuxBackendContext*,
+                                               const void* signatures,
+                                               void* addresses,
+                                               size_t num_signatures) {
+    if (!signatures || !addresses) return LUX_BACKEND_ERROR_INVALID_ARGUMENT;
+    if (num_signatures == 0) return LUX_BACKEND_OK;
+
+    const auto* sigs = static_cast<const CpuEcrecoverInput*>(signatures);
+    auto* addrs = static_cast<CpuEcrecoverOutput*>(addresses);
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic, 16) if(num_signatures > 16)
+#endif
+    for (size_t i = 0; i < num_signatures; i++) {
+        std::memset(&addrs[i], 0, sizeof(CpuEcrecoverOutput));
+        if (secp_ecrecover_single(sigs[i].r, sigs[i].s, sigs[i].v,
+                                   sigs[i].msg_hash, addrs[i].address)) {
+            addrs[i].valid = 1;
+        }
+    }
+    return LUX_BACKEND_OK;
+}
+
+// =============================================================================
 // CPU Backend VTable
 // =============================================================================
 
@@ -1717,8 +2127,11 @@ static const lux_gpu_backend_vtbl cpu_vtbl = {
     .op_kzg_open = cpu_op_kzg_open,
     .op_kzg_verify = cpu_op_kzg_verify,
 
+    // secp256k1 ecrecover
+    .op_ecrecover_batch = cpu_op_ecrecover_batch,
+
     // Reserved
-    ._reserved = {nullptr, nullptr, nullptr, nullptr}
+    ._reserved = {nullptr, nullptr, nullptr}
 };
 
 // =============================================================================
@@ -1735,7 +2148,8 @@ extern "C" bool cpu_backend_init(lux_gpu_backend_desc* out) {
                       | LUX_CAP_REDUCE | LUX_CAP_SOFTMAX | LUX_CAP_UNARY
                       | LUX_CAP_NORMALIZATION | LUX_CAP_BN254 | LUX_CAP_KZG
                       | LUX_CAP_POSEIDON2 | LUX_CAP_BLAKE3 | LUX_CAP_BLIND_ROTATE
-                      | LUX_CAP_POLY_MUL | LUX_CAP_KECCAK256;
+                      | LUX_CAP_POLY_MUL | LUX_CAP_KECCAK256
+                      | LUX_CAP_ECRECOVER;
     out->vtbl = &cpu_vtbl;
     return true;
 }

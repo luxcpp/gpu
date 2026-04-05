@@ -1456,6 +1456,18 @@ LuxError lux_gpu_keccak256_batch(LuxGPU* gpu, const uint8_t* inputs, uint8_t* ou
 }
 
 // =============================================================================
+// Crypto: secp256k1 ECDSA Recovery (Ethereum ecrecover)
+// =============================================================================
+
+LuxError lux_gpu_ecrecover_batch(LuxGPU* gpu, const LuxEcrecoverInput* signatures, LuxEcrecoverOutput* addresses, size_t num_signatures) {
+    if (!gpu || !gpu->vtbl) return LUX_ERROR_INVALID_ARGUMENT;
+    if (!signatures || !addresses) return LUX_ERROR_INVALID_ARGUMENT;
+    if (num_signatures == 0) return LUX_OK;
+    if (!gpu->vtbl->op_ecrecover_batch) return LUX_ERROR_NOT_SUPPORTED;
+    return static_cast<LuxError>(gpu->vtbl->op_ecrecover_batch(gpu->ctx, signatures, addresses, num_signatures));
+}
+
+// =============================================================================
 // Crypto: MSM
 // =============================================================================
 

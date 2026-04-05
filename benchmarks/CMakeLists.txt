@@ -74,6 +74,17 @@ target_include_directories(bench_fhe PRIVATE
 )
 target_link_libraries(bench_fhe PRIVATE luxgpu_core)
 
+# Ecrecover benchmark
+add_executable(bench_ecrecover
+    ${CMAKE_CURRENT_SOURCE_DIR}/../test/bench_ecrecover.cpp
+    ${BENCH_COMMON_HEADER}
+)
+target_include_directories(bench_ecrecover PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+target_link_libraries(bench_ecrecover PRIVATE luxgpu_core)
+
 # Comprehensive benchmark suite
 add_executable(bench_all
     bench_all.cpp
@@ -94,6 +105,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR NOT CMAKE_BUILD_TYPE)
     target_compile_options(bench_tensor PRIVATE -O3 -DNDEBUG)
     target_compile_options(bench_crypto PRIVATE -O3 -DNDEBUG)
     target_compile_options(bench_fhe PRIVATE -O3 -DNDEBUG)
+    target_compile_options(bench_ecrecover PRIVATE -O3 -DNDEBUG)
     target_compile_options(bench_all PRIVATE -O3 -DNDEBUG)
 endif()
 
@@ -103,6 +115,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(bench_tensor PRIVATE ${BENCH_WARNINGS})
     target_compile_options(bench_crypto PRIVATE ${BENCH_WARNINGS})
     target_compile_options(bench_fhe PRIVATE ${BENCH_WARNINGS})
+    target_compile_options(bench_ecrecover PRIVATE ${BENCH_WARNINGS})
     target_compile_options(bench_all PRIVATE ${BENCH_WARNINGS})
 endif()
 
@@ -115,6 +128,7 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(bench_tensor PRIVATE OpenMP::OpenMP_CXX)
     target_link_libraries(bench_crypto PRIVATE OpenMP::OpenMP_CXX)
     target_link_libraries(bench_fhe PRIVATE OpenMP::OpenMP_CXX)
+    target_link_libraries(bench_ecrecover PRIVATE OpenMP::OpenMP_CXX)
     target_link_libraries(bench_all PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
@@ -156,7 +170,7 @@ add_custom_target(run_fhe_benchmarks
 # Installation
 # =============================================================================
 
-install(TARGETS bench_tensor bench_crypto bench_fhe bench_all
+install(TARGETS bench_tensor bench_crypto bench_fhe bench_ecrecover bench_all
     RUNTIME DESTINATION bin/benchmarks
 )
 

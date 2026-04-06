@@ -77,6 +77,9 @@ option(LUX_GPU_BUILD_TESTS "Build tests" ON)
 option(LUX_GPU_BUILD_BENCHMARKS "Build benchmark harness" OFF)
 option(LUX_GPU_CPU_BACKEND "Build CPU fallback backend (recommended)" ON)
 option(LUX_GPU_CPU_USE_OPENMP "Use OpenMP for CPU backend parallelization" ON)
+option(LUX_GPU_METAL_BACKEND "Build Metal backend plugin (macOS only)" ON)
+option(LUX_GPU_CUDA_BACKEND "Build CUDA backend plugin" OFF)
+option(LUX_GPU_DAWN_BACKEND "Build Dawn/WebGPU backend plugin" OFF)
 
 # =============================================================================
 # Core Library (Static + Shared)
@@ -148,6 +151,150 @@ set_target_properties(luxgpu_core PROPERTIES
 )
 
 # =============================================================================
+# Metal Backend Plugin (macOS only)
+# =============================================================================
+
+if(LUX_GPU_METAL_BACKEND AND APPLE)
+    # Verify Metal.framework is available
+    find_library(METAL_FRAMEWORK Metal)
+    find_library(FOUNDATION_FRAMEWORK Foundation)
+
+    if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
+        enable_language(OBJCXX)
+
+        add_library(luxgpu_backend_metal SHARED src/metal_backend.mm)
+
+        target_include_directories(luxgpu_backend_metal PRIVATE
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        )
+
+        target_link_libraries(luxgpu_backend_metal PRIVATE
+            ${METAL_FRAMEWORK}
+            ${FOUNDATION_FRAMEWORK}
+        )
+
+        set_target_properties(luxgpu_backend_metal PROPERTIES
+            OUTPUT_NAME "luxgpu_backend_metal"
+            CXX_STANDARD 17
+            OBJCXX_STANDARD 17
+        )
+
+        # Suppress -Wconversion warnings from ObjC bridge casts
+        target_compile_options(luxgpu_backend_metal PRIVATE -Wno-sign-conversion)
+
+        # Copy kernel sources next to the built library for runtime loading
+        add_custom_command(TARGET luxgpu_backend_metal POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/kernels/keccak256.metal
+                $<TARGET_FILE_DIR:luxgpu_backend_metal>/keccak256.metal
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_recover.metal
+                $<TARGET_FILE_DIR:luxgpu_backend_metal>/secp256k1_recover.metal
+        )
+
+        install(TARGETS luxgpu_backend_metal
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+
+        set(HAS_METAL_BACKEND TRUE)
+        message(STATUS "Metal backend: ENABLED")
+    else()
+        set(HAS_METAL_BACKEND FALSE)
+        message(STATUS "Metal backend: DISABLED (Metal.framework not found)")
+    endif()
+else()
+    set(HAS_METAL_BACKEND FALSE)
+    if(APPLE)
+        message(STATUS "Metal backend: DISABLED (LUX_GPU_METAL_BACKEND=OFF)")
+    else()
+        message(STATUS "Metal backend: DISABLED (not macOS)")
+    endif()
+endif()
+
+# =============================================================================
+# CUDA Backend Plugin (guarded by LUX_GPU_CUDA_BACKEND)
+# =============================================================================
+
+if(LUX_GPU_CUDA_BACKEND)
+    find_package(CUDAToolkit QUIET)
+
+    add_library(luxgpu_backend_cuda SHARED src/cuda_backend.cpp)
+
+    target_include_directories(luxgpu_backend_cuda PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+
+    if(CUDAToolkit_FOUND)
+        target_compile_definitions(luxgpu_backend_cuda PRIVATE LUX_GPU_CUDA)
+        target_link_libraries(luxgpu_backend_cuda PRIVATE CUDA::cudart)
+        set(HAS_CUDA_BACKEND TRUE)
+        message(STATUS "CUDA backend: ENABLED (CUDA ${CUDAToolkit_VERSION})")
+    else()
+        set(HAS_CUDA_BACKEND TRUE)
+        message(STATUS "CUDA backend: ENABLED (stub mode, no CUDA toolkit)")
+    endif()
+
+    set_target_properties(luxgpu_backend_cuda PROPERTIES
+        OUTPUT_NAME "luxgpu_backend_cuda"
+        CXX_STANDARD 17
+    )
+
+    install(TARGETS luxgpu_backend_cuda
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+else()
+    set(HAS_CUDA_BACKEND FALSE)
+    message(STATUS "CUDA backend: DISABLED (LUX_GPU_CUDA_BACKEND=OFF)")
+endif()
+
+# =============================================================================
+# Dawn/WebGPU Backend Plugin (guarded by LUX_GPU_DAWN_BACKEND)
+# =============================================================================
+
+if(LUX_GPU_DAWN_BACKEND)
+    add_library(luxgpu_backend_webgpu SHARED src/dawn_backend.cpp)
+
+    target_include_directories(luxgpu_backend_webgpu PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+
+    # Check for Dawn or wgpu-native
+    find_package(Dawn QUIET)
+    if(Dawn_FOUND)
+        target_compile_definitions(luxgpu_backend_webgpu PRIVATE LUX_GPU_DAWN USE_DAWN_API)
+        target_link_libraries(luxgpu_backend_webgpu PRIVATE dawn::webgpu)
+        message(STATUS "Dawn backend: ENABLED (Dawn)")
+    else()
+        # Build without WebGPU runtime — keccak256 falls back to CPU
+        message(STATUS "Dawn backend: ENABLED (stub mode, no Dawn/wgpu)")
+    endif()
+
+    set_target_properties(luxgpu_backend_webgpu PROPERTIES
+        OUTPUT_NAME "luxgpu_backend_webgpu"
+        CXX_STANDARD 17
+    )
+
+    # Copy WGSL kernels
+    add_custom_command(TARGET luxgpu_backend_webgpu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/kernels/keccak256.wgsl
+            $<TARGET_FILE_DIR:luxgpu_backend_webgpu>/keccak256.wgsl
+    )
+
+    install(TARGETS luxgpu_backend_webgpu
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+
+    set(HAS_DAWN_BACKEND TRUE)
+else()
+    set(HAS_DAWN_BACKEND FALSE)
+    message(STATUS "Dawn backend: DISABLED (LUX_GPU_DAWN_BACKEND=OFF)")
+endif()
+
+# =============================================================================
 # Tests (backend-agnostic)
 # =============================================================================
 
@@ -176,9 +323,19 @@ if(LUX_GPU_BUILD_TESTS)
     target_link_libraries(test_edge_cases PRIVATE luxgpu_core)
     add_test(NAME test_edge_cases COMMAND test_edge_cases)
 
+    # Backend integration test
+    add_executable(test_backends test/test_backends.cpp)
+    target_link_libraries(test_backends PRIVATE luxgpu_core)
+    add_test(NAME test_backends COMMAND test_backends)
+
+    # Link Metal backend into test if available
+    if(HAS_METAL_BACKEND)
+        add_dependencies(test_backends luxgpu_backend_metal)
+    endif()
+
     # Set library path for tests to find plugins
     set_tests_properties(test_gpu_core test_kernel_loader test_zk_ops
-                        test_coverage_complete test_edge_cases PROPERTIES
+                        test_coverage_complete test_edge_cases test_backends PROPERTIES
         ENVIRONMENT "LUX_GPU_BACKEND_PATH=${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
@@ -278,12 +435,10 @@ message(STATUS "=== Lux GPU Core Configuration ===")
 message(STATUS "  Version: ${PROJECT_VERSION}")
 message(STATUS "  CPU Backend: ${LUX_GPU_CPU_BACKEND}")
 message(STATUS "  OpenMP: ${_openmp_status}")
+message(STATUS "  Metal Backend: ${HAS_METAL_BACKEND}")
+message(STATUS "  CUDA Backend: ${HAS_CUDA_BACKEND}")
+message(STATUS "  Dawn Backend: ${HAS_DAWN_BACKEND}")
 message(STATUS "  Tests: ${LUX_GPU_BUILD_TESTS}")
 message(STATUS "  Benchmarks: ${LUX_GPU_BUILD_BENCHMARKS}")
 message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-message(STATUS "")
-message(STATUS "Backend plugins (built separately):")
-message(STATUS "  Metal:  luxcpp/metal  (macOS arm64)")
-message(STATUS "  CUDA:   luxcpp/cuda   (Linux/Windows)")
-message(STATUS "  WebGPU: luxcpp/webgpu (cross-platform)")
 message(STATUS "")

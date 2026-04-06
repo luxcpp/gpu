@@ -1906,6 +1906,10 @@ static bool secp_ecrecover_single(const uint8_t* r_bytes, const uint8_t* s_bytes
     Secp256k1U256 s = secp_load_be32(s_bytes);
     Secp256k1U256 e = secp_load_be32(hash_bytes);
 
+    // Normalize v: EIP-155 sends v = {0,1,27,28} or chain_id*2+{35,36}.
+    if (v >= 27) v -= 27;
+    if (v >= 2) v = v % 2;
+
     if (secp_is_zero(r) || secp_cmp(r, SECP_N) >= 0) return false;
     if (secp_is_zero(s) || secp_cmp(s, SECP_N) >= 0) return false;
     if (v > 1) return false;

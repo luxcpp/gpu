@@ -145,8 +145,10 @@ inline uint256 u256_sub(uint256 a, uint256 b, thread ulong &borrow) {
 // where m is either p or n, inv is the corresponding -m^(-1) mod 2^64
 inline uint256 mont_reduce(ulong t[8], uint256 m, ulong inv) {
     // CIOS (Coarsely Integrated Operand Scanning) reduction
-    ulong a[8];
+    // Use 9 limbs to prevent carry overflow on the 8th limb.
+    ulong a[9];
     for (int i = 0; i < 8; i++) a[i] = t[i];
+    a[8] = 0;
 
     for (int i = 0; i < 4; i++) {
         ulong u = a[i] * inv;
@@ -188,8 +190,8 @@ inline uint256 mont_reduce(ulong t[8], uint256 m, ulong inv) {
             a[i + j] = sum;
             carry = hi;
         }
-        // Propagate carry
-        for (int j = 4; i + j < 8; j++) {
+        // Propagate carry through index 8.
+        for (int j = 4; i + j <= 8; j++) {
             ulong sum = a[i + j] + carry;
             carry = (sum < a[i + j]) ? 1UL : 0UL;
             a[i + j] = sum;
@@ -197,15 +199,15 @@ inline uint256 mont_reduce(ulong t[8], uint256 m, ulong inv) {
         }
     }
 
-    // Result is in a[4..7]
+    // Result is in a[4..7]. Check a[8] for final subtraction.
     uint256 r;
     r.limbs[0] = a[4];
     r.limbs[1] = a[5];
     r.limbs[2] = a[6];
     r.limbs[3] = a[7];
 
-    // Final subtraction if r >= m
-    if (u256_cmp(r, m) >= 0) {
+    // Final subtraction if r >= m or if 9th limb is set.
+    if (a[8] || u256_cmp(r, m) >= 0) {
         ulong bw;
         r = u256_sub(r, m, bw);
     }
@@ -702,8 +704,11 @@ inline void store_be32(uint256 val, thread uchar bytes[32]) {
 kernel void secp256k1_ecrecover_batch(
     device const EcrecoverInput*  inputs  [[buffer(0)]],
     device EcrecoverOutput*       outputs [[buffer(1)]],
+    constant uint&                num_sigs [[buffer(2)]],
     uint tid                              [[thread_position_in_grid]])
 {
+    if (tid >= num_sigs) return;
+
     device const EcrecoverInput& inp = inputs[tid];
     device EcrecoverOutput& out = outputs[tid];
 
@@ -717,6 +722,10 @@ kernel void secp256k1_ecrecover_batch(
     uint256 s = load_be32_device(inp.s);
     uint256 e = load_be32_device(inp.msg_hash);
     uint v = uint(inp.v);
+
+    // Normalize v: EIP-155 sends v = {0,1,27,28} or chain_id*2+{35,36}.
+    if (v >= 27) v -= 27;
+    if (v >= 2) v = v % 2;  // handles EIP-155 chain-encoded values
 
     // Validate: r and s must be in [1, n-1]
     if (u256_is_zero(r) || u256_cmp(r, SECP256K1_N) >= 0) return;

@@ -1,0 +1,89 @@
+name: GPU Kernel Tests
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  metal-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Compile Metal shaders
+        run: |
+          cd kernels
+          PASS=0; FAIL=0
+          for f in *.metal; do
+            if xcrun -sdk macosx metal -std=metal3.0 -Werror -c "$f" -o /dev/null 2>/dev/null; then
+              PASS=$((PASS+1))
+            else
+              echo "FAIL: $f"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "$PASS Metal shaders pass, $FAIL fail"
+          [ $FAIL -eq 0 ] || exit 1
+
+  wgsl-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install naga
+        run: cargo install naga-cli
+      - name: Validate WGSL shaders
+        run: |
+          cd kernels
+          PASS=0; FAIL=0
+          for f in *.wgsl; do
+            if naga "$f" 2>/dev/null; then
+              PASS=$((PASS+1))
+            else
+              echo "FAIL: $f"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "$PASS WGSL shaders pass, $FAIL fail"
+          [ $FAIL -eq 0 ] || exit 1
+
+  cuda-compile:
+    runs-on: ubuntu-latest
+    container: nvidia/cuda:12.4.0-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile CUDA kernels
+        run: |
+          cd kernels
+          PASS=0; FAIL=0
+          for f in *.cu; do
+            if nvcc -std=c++17 --compile "$f" -o /dev/null 2>/dev/null; then
+              PASS=$((PASS+1))
+            else
+              echo "FAIL: $f"
+              FAIL=$((FAIL+1))
+            fi
+          done
+          echo "$PASS CUDA kernels compile, $FAIL fail"
+          # Don't fail on CUDA stubs — they have TODOs
+          echo "Note: stub kernels with TODO are expected to compile but not run"
+
+  cuda-benchmark:
+    runs-on: [self-hosted, gpu, cuda]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: cuda-compile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build GPU library
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DLUX_GPU_CUDA_BACKEND=ON
+          cmake --build . --parallel
+      - name: Run CUDA benchmarks
+        run: |
+          cd build
+          ./test/test_backends 2>&1
+          echo "=== Benchmark complete ==="

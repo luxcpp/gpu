@@ -87,3 +87,13 @@ jobs:
           cd build
           ./test/test_backends 2>&1
           echo "=== Benchmark complete ==="
+
+  cuda-cpu-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile CUDA kernels as C++ (CPU mode)
+        run: |
+          g++ -std=c++17 -O2 -I kernels -o test_cuda_cpu test/test_cuda_cpu.cpp
+      - name: Run CUDA CPU-mode tests
+        run: ./test_cuda_cpu

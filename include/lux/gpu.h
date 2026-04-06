@@ -489,6 +489,117 @@ LuxError lux_gpu_nullifier(LuxGPU* gpu,
                            size_t n);
 
 // =============================================================================
+// Crypto Operations: Post-Quantum Signatures
+// =============================================================================
+
+// ML-DSA-65 (FIPS 204, CRYSTALS-Dilithium) batch signature verification
+// pubkeys: array of public keys (1952 bytes each)
+// messages: array of message hashes (64 bytes each)
+// signatures: array of signatures (3360 bytes each, padded)
+// results: output boolean array (1=valid, 0=invalid)
+LuxError lux_gpu_mldsa_verify_batch(LuxGPU* gpu,
+                                    const uint8_t* const* pubkeys,
+                                    const uint8_t* const* messages,
+                                    const uint8_t* const* signatures,
+                                    bool* results,
+                                    size_t count);
+
+// ML-KEM-768 (FIPS 203, CRYSTALS-Kyber) batch decapsulation
+// secret_keys: array of decapsulation keys (2400 bytes each)
+// ciphertexts: array of ciphertexts (1088 bytes each)
+// shared_secrets: output array of shared secrets (32 bytes each)
+LuxError lux_gpu_mlkem_decapsulate_batch(LuxGPU* gpu,
+                                         const uint8_t* const* secret_keys,
+                                         const uint8_t* const* ciphertexts,
+                                         uint8_t** shared_secrets,
+                                         size_t count);
+
+// SLH-DSA (FIPS 205, SPHINCS+) batch signature verification
+// pubkeys: array of public keys (32 bytes each for SHAKE-128f)
+// messages: array of message hashes (32 bytes each)
+// signatures: array of signatures (up to 17088 bytes each)
+LuxError lux_gpu_slhdsa_verify_batch(LuxGPU* gpu,
+                                     const uint8_t* const* pubkeys,
+                                     const uint8_t* const* messages,
+                                     const uint8_t* const* signatures,
+                                     bool* results,
+                                     size_t count);
+
+// =============================================================================
+// Crypto Operations: Threshold Signatures
+// =============================================================================
+
+// Ringtail lattice-based threshold partial signing
+// shares: array of secret shares (1024 bytes each, 256 int32 coefficients)
+// messages: array of message hashes (32 bytes each)
+// partial_sigs: output partial signatures (1024 bytes each)
+LuxError lux_gpu_ringtail_partial_sign_batch(LuxGPU* gpu,
+                                             const uint8_t* const* shares,
+                                             const uint8_t* const* messages,
+                                             uint8_t** partial_sigs,
+                                             size_t count);
+
+// Ringtail threshold combine: merge k partial sigs into one
+// partial_sigs: array of partial signatures [count * threshold]
+// lagrange_coeffs: Lagrange interpolation coefficients [count * threshold]
+// combined_sigs: output combined signatures [count]
+LuxError lux_gpu_ringtail_combine_batch(LuxGPU* gpu,
+                                        const uint8_t* const* partial_sigs,
+                                        const int32_t* lagrange_coeffs,
+                                        uint8_t** combined_sigs,
+                                        size_t threshold,
+                                        size_t count);
+
+// FROST threshold Schnorr partial signature verification
+// commitments: participant commitments (66 bytes each)
+// signatures: partial signature scalars (32 bytes each)
+// pubkeys: public key shares (33 bytes each)
+// challenges: pre-computed c*lambda_i scalars (32 bytes each)
+LuxError lux_gpu_frost_partial_verify_batch(LuxGPU* gpu,
+                                            const uint8_t* const* commitments,
+                                            const uint8_t* const* signatures,
+                                            const uint8_t* const* pubkeys,
+                                            const uint8_t* const* challenges,
+                                            bool* results,
+                                            size_t count);
+
+// CGGMP21 threshold ECDSA partial signing
+// inputs: k_share[32] || chi_share[32] || msg_hash[32] || gamma_share[32] per entry
+// r_x: x-coordinate of combined nonce R (32 bytes)
+// partial_sigs: output sigma_i values (32 bytes each)
+LuxError lux_gpu_cggmp21_partial_sign_batch(LuxGPU* gpu,
+                                            const uint8_t* const* inputs,
+                                            const uint8_t* r_x,
+                                            uint8_t** partial_sigs,
+                                            size_t count);
+
+// =============================================================================
+// Crypto Operations: Ed25519 / sr25519
+// =============================================================================
+
+// Ed25519 batch signature verification
+// pubkeys: 32-byte compressed points
+// messages: 64-byte pre-computed H(R||A||M), reduced mod L by host
+// signatures: 64-byte signatures (R[32] || S[32])
+LuxError lux_gpu_ed25519_verify_batch(LuxGPU* gpu,
+                                      const uint8_t* const* pubkeys,
+                                      const uint8_t* const* messages,
+                                      const uint8_t* const* signatures,
+                                      bool* results,
+                                      size_t count);
+
+// sr25519 (Schnorrkel/Ristretto255) batch signature verification
+// pubkeys: 32-byte Ristretto255 compressed points
+// messages: 64-byte pre-computed transcript hashes
+// signatures: 64-byte signatures (R[32] || s[32])
+LuxError lux_gpu_sr25519_verify_batch(LuxGPU* gpu,
+                                      const uint8_t* const* pubkeys,
+                                      const uint8_t* const* messages,
+                                      const uint8_t* const* signatures,
+                                      bool* results,
+                                      size_t count);
+
+// =============================================================================
 // Stream/Event Management
 // =============================================================================
 

@@ -400,8 +400,105 @@ typedef struct lux_gpu_backend_vtbl {
         size_t num_signatures
     );
 
-    // Reserved for future expansion (don't break ABI)
-    void* _reserved[3];
+    // ==========================================================================
+    // Crypto: Post-Quantum Signatures
+    // ==========================================================================
+
+    // ML-DSA-65 batch verification
+    LuxBackendError (*op_mldsa_verify_batch)(
+        LuxBackendContext* ctx,
+        const void* pubkeys,          // MLDSAPublicKey[count]
+        const void* messages,         // MLDSAMessage[count]
+        const void* signatures,       // MLDSASignature[count]
+        uint32_t* results,            // 1=valid, 0=invalid
+        size_t count
+    );
+
+    // ML-KEM-768 batch decapsulation
+    LuxBackendError (*op_mlkem_decapsulate_batch)(
+        LuxBackendContext* ctx,
+        const void* secret_keys,      // MLKEMSecretKey[count]
+        const void* ciphertexts,      // MLKEMCiphertext[count]
+        void* shared_secrets,         // 32 bytes per output
+        size_t count
+    );
+
+    // SLH-DSA batch verification
+    LuxBackendError (*op_slhdsa_verify_batch)(
+        LuxBackendContext* ctx,
+        const void* pubkeys,
+        const void* messages,
+        const void* signatures,
+        uint32_t* results,
+        size_t count
+    );
+
+    // ==========================================================================
+    // Crypto: Threshold Signatures
+    // ==========================================================================
+
+    // Ringtail partial signing
+    LuxBackendError (*op_ringtail_partial_sign_batch)(
+        LuxBackendContext* ctx,
+        const void* shares,
+        const void* messages,
+        void* partial_sigs,
+        size_t count
+    );
+
+    // Ringtail combine partial signatures
+    LuxBackendError (*op_ringtail_combine_batch)(
+        LuxBackendContext* ctx,
+        const void* partial_sigs,
+        const int32_t* lagrange_coeffs,
+        void* combined_sigs,
+        size_t threshold,
+        size_t count
+    );
+
+    // FROST partial verification
+    LuxBackendError (*op_frost_partial_verify_batch)(
+        LuxBackendContext* ctx,
+        const void* commitments,
+        const void* signatures,
+        const void* pubkeys,
+        const void* challenges,
+        uint32_t* results,
+        size_t count
+    );
+
+    // CGGMP21 partial signing
+    LuxBackendError (*op_cggmp21_partial_sign_batch)(
+        LuxBackendContext* ctx,
+        const void* inputs,
+        const void* r_x,
+        void* partial_sigs,
+        size_t count
+    );
+
+    // ==========================================================================
+    // Crypto: Ed25519 / sr25519
+    // ==========================================================================
+
+    // Ed25519 batch verification
+    LuxBackendError (*op_ed25519_verify_batch)(
+        LuxBackendContext* ctx,
+        const void* pubkeys,
+        const void* messages,
+        const void* signatures,
+        uint32_t* results,
+        size_t count
+    );
+
+    // sr25519 batch verification
+    LuxBackendError (*op_sr25519_verify_batch)(
+        LuxBackendContext* ctx,
+        const void* pubkeys,
+        const void* messages,
+        const void* signatures,
+        uint32_t* results,
+        size_t count
+    );
 
 } lux_gpu_backend_vtbl;
 
@@ -439,6 +536,14 @@ typedef struct {
 #define LUX_CAP_POLY_MUL        (1 << 18)  // Polynomial multiplication
 #define LUX_CAP_KECCAK256       (1 << 19)  // Keccak-256 hash (Ethereum)
 #define LUX_CAP_ECRECOVER       (1 << 20)  // secp256k1 ECDSA recovery (Ethereum ecrecover)
+#define LUX_CAP_MLDSA           (1 << 21)  // ML-DSA-65 (FIPS 204) signature verification
+#define LUX_CAP_MLKEM           (1 << 22)  // ML-KEM-768 (FIPS 203) key encapsulation
+#define LUX_CAP_SLHDSA          (1 << 23)  // SLH-DSA (FIPS 205) hash-based signatures
+#define LUX_CAP_RINGTAIL        (1 << 24)  // Ringtail lattice-based threshold signatures
+#define LUX_CAP_FROST           (1 << 25)  // FROST threshold Schnorr signatures
+#define LUX_CAP_CGGMP21         (1 << 26)  // CGGMP21 threshold ECDSA
+#define LUX_CAP_ED25519         (1 << 27)  // Ed25519 EdDSA
+#define LUX_CAP_SR25519         (1 << 28)  // sr25519 Schnorrkel/Ristretto255
 
 // =============================================================================
 // Plugin Entry Point

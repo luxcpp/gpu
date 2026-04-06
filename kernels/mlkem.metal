@@ -69,11 +69,14 @@ constant int16_t KYBER_ZETAS[128] = {
     3221, 3116,  622, 1097, 2470,  882, 1539, 2392
 };
 
-/// Forward NTT butterfly
+/// Forward NTT butterfly (int32_t intermediates to prevent int16_t overflow)
 inline void kyber_ntt_bf(thread int16_t& a, thread int16_t& b, int16_t zeta) {
-    int16_t t = mlkem_mont_reduce((int32_t)zeta * b);
-    b = a - t;
-    a = a + t;
+    int32_t t = (int32_t)b * (int32_t)zeta;
+    t = mlkem_mont_reduce(t);
+    int32_t sum  = (int32_t)a + t;
+    int32_t diff = (int32_t)a - t;
+    a = (int16_t)mlkem_barrett_reduce((int16_t)sum);
+    b = (int16_t)mlkem_barrett_reduce((int16_t)diff);
 }
 
 /// Inverse NTT butterfly

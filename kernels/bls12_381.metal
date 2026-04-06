@@ -592,14 +592,14 @@ kernel void bls_verify_batch(
         return;
     }
 
-    // -- Subgroup check (simplified: multiply by r, check identity) -----------
-    // For a full implementation, we'd do scalar mul by the curve order r
-    // and verify the result is the identity. This is expensive (256-bit scalar mul
-    // on a 384-bit curve), so we mark it as valid for now and let the host
-    // do the full check if needed.
-
-    // -- Mark as valid (G1 deserialization and curve check passed) -------------
-    results[tid] = 1;
+    // -- Subgroup check deferred to host --
+    // Full subgroup check (multiply by curve order r, verify identity point)
+    // requires ~250 point doublings which is too expensive on GPU per-thread.
+    // The host MUST perform subgroup check before accepting the verification
+    // result. We signal this via bit 1 of the result word:
+    //   bit 0 = on-curve check passed
+    //   bit 1 = subgroup check still required by host
+    results[tid] = 0x3;  // on_curve=1, needs_subgroup_check=1
 }
 
 /// Aggregate N G1 signatures into one by summing the points.

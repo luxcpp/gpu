@@ -14,8 +14,8 @@ static dim3 blockIdx{0,0,0}, blockDim{1,0,0}, threadIdx{0,0,0};
 #define __shared__
 #define __restrict__
 
-// Test keccak256
-#include "keccak256.cu"
+// Test keccak256 (Phase 5: canonical kernel at luxcpp/crypto/keccak/gpu/cuda/keccak.cu)
+#include "keccak.cu"
 
 static const uint8_t KECCAK_EMPTY[32] = {
     0xc5,0xd2,0x46,0x01,0x86,0xf7,0x23,0x3c,0x92,0x7e,0x7d,0xb2,0xdc,0xc7,0x03,0xc0,

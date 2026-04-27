@@ -182,13 +182,15 @@ if(LUX_GPU_METAL_BACKEND AND APPLE)
         # Suppress -Wconversion warnings from ObjC bridge casts
         target_compile_options(luxgpu_backend_metal PRIVATE -Wno-sign-conversion)
 
-        # Copy kernel sources next to the built library for runtime loading
+        # Copy canonical kernel sources from luxcpp/crypto next to the built library for runtime loading
+        # (Phase 5 de-dupe: kernels live at luxcpp/crypto/<alg>/gpu/{cuda,metal,wgsl}/)
+        set(LUX_CRYPTO_GPU_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../crypto)
         add_custom_command(TARGET luxgpu_backend_metal POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/kernels/keccak256.metal
+                ${LUX_CRYPTO_GPU_DIR}/keccak/gpu/metal/keccak.metal
                 $<TARGET_FILE_DIR:luxgpu_backend_metal>/keccak256.metal
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_SOURCE_DIR}/kernels/secp256k1_recover.metal
+                ${LUX_CRYPTO_GPU_DIR}/secp256k1/gpu/metal/secp256k1_recover.metal
                 $<TARGET_FILE_DIR:luxgpu_backend_metal>/secp256k1_recover.metal
         )
 
@@ -276,10 +278,10 @@ if(LUX_GPU_DAWN_BACKEND)
         CXX_STANDARD 17
     )
 
-    # Copy WGSL kernels
+    # Copy canonical WGSL kernels from luxcpp/crypto (Phase 5 de-dupe)
     add_custom_command(TARGET luxgpu_backend_webgpu POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/kernels/keccak256.wgsl
+            ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/keccak/gpu/wgsl/keccak.wgsl
             $<TARGET_FILE_DIR:luxgpu_backend_webgpu>/keccak256.wgsl
     )
 
@@ -444,7 +446,10 @@ message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSIO
 message(STATUS "")
 
 # CPU-mode CUDA kernel tests (no nvcc required, compiles .cu as C++)
+# Phase 5: kernels are canonical at luxcpp/crypto/<alg>/gpu/cuda/
 add_executable(test_cuda_cpu test/test_cuda_cpu.cpp)
-target_include_directories(test_cuda_cpu PRIVATE kernels)
+target_include_directories(test_cuda_cpu PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../crypto/keccak/gpu/cuda
+)
 target_compile_features(test_cuda_cpu PRIVATE cxx_std_17)
 add_test(NAME cuda_cpu_mode COMMAND test_cuda_cpu)
